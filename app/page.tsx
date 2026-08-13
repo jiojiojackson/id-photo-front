@@ -40,6 +40,7 @@ async function compressImage(file: File): Promise<File> {
 }
 
 function normalizeDimension(value: string, fallback: number) {
+  if (!value.trim()) return fallback;
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(3000, Math.max(100, parsed));
@@ -94,8 +95,8 @@ export default function Home() {
   }
   function onFileChange(e: ChangeEvent<HTMLInputElement>) { const selected = e.target.files?.[0]; if (selected) handleFile(selected); }
   function selectPreset(w: number, h: number) { setWidthInput(String(w)); setHeightInput(String(h)); setError(""); }
-  function commitWidth() { setWidthInput(String(normalizeDimension(widthInput, 295))); }
-  function commitHeight() { setHeightInput(String(normalizeDimension(heightInput, 413))); }
+  function commitWidth() { if (widthInput.trim()) setWidthInput(String(normalizeDimension(widthInput, 295))); }
+  function commitHeight() { if (heightInput.trim()) setHeightInput(String(normalizeDimension(heightInput, 413))); }
 
   async function generate() {
     if (!file) { setError("请选择照片"); return; }
@@ -131,7 +132,7 @@ export default function Home() {
       <section className="card"><button className="primary" onClick={() => fileInputRef.current?.click()}>{file ? "重新选择照片" : "选择照片"}</button><input ref={fileInputRef} type="file" accept="image/*" hidden onChange={onFileChange} />{originalPreview && <div className="preview"><img src={originalPreview} alt="原始照片" /></div>}{file && <div className="hint">原图大小：{formatBytes(file.size)}，生成时会自动压缩至 2 MB 以内</div>}</section>
       <section className="card"><h2>照片尺寸</h2><div className="preset-grid">{PRESETS.map((preset) => <button key={preset.name} className={width === preset.width && height === preset.height ? "preset active" : "preset"} onClick={() => selectPreset(preset.width, preset.height)}><strong>{preset.name}</strong></button>)}</div><div className="size-row"><label>宽度<input type="number" min="100" max="3000" inputMode="numeric" value={widthInput} onChange={(e) => setWidthInput(e.target.value.replace(/[^0-9]/g, ""))} onBlur={commitWidth} /></label><span>×</span><label>高度<input type="number" min="100" max="3000" inputMode="numeric" value={heightInput} onChange={(e) => setHeightInput(e.target.value.replace(/[^0-9]/g, ""))} onBlur={commitHeight} /></label></div><div className="hint">单位：像素（100–3000）</div></section>
       <section className="card"><button className="generate" onClick={generate} disabled={!file || loading}>{loading ? (loadingMessage || "正在生成……") : "生成证件照"}</button>{loading && <div className="hint" style={{ marginTop: "10px", textAlign: "center" }}>首次生成可能需要等待几十秒，请不要关闭页面。</div>}{error && <div className="error">{error}</div>}</section>
-      {resultUrl && <section className="card"><h2>处理结果</h2>{resultSize && <div className="hint">高清尺寸：{resultSize}</div>}<div className="result-preview"><canvas ref={canvasRef} /></div><div className="background-row"><label>背景色</label><input ref={colorInputRef} type="color" value={background} onChange={(e) => setBackground(e.target.value)} aria-label="自定义背景色" /><span>{background}</span></div><div className="color-grid">{["#ffffff", "#438EDB", "#2A5CAA", "#F5F5F5", "#D32F2F", "#00A651"].map((color) => <button key={color} className="color-button" style={{ backgroundColor: color }} aria-label={`背景色 ${color}`} onClick={() => setBackground(color)} />)}<button type="button" className="color-button custom-color" style={{ background: "conic-gradient(red, yellow, lime, cyan, blue, magenta, red)" }} aria-label="自定义背景色" onClick={() => { if (colorInputRef.current) { if (typeof colorInputRef.current.showPicker === "function") colorInputRef.current.showPicker(); else colorInputRef.current.click(); } }}><span style={{ pointerEvents: "none" }}>＋</span></button></div><div className="hint">点击彩色“＋”打开调色盘，自由选择任意背景色。</div><button className="download" onClick={download}>下载证件照</button></section>}
+      {resultUrl && <section className="card"><h2>处理结果</h2>{resultSize && <div className="hint">高清尺寸：{resultSize}</div>}<div className="result-preview"><canvas ref={canvasRef} /></div><div className="background-row"><label>背景色</label><span>{background}</span></div><div className="color-grid">{["#ffffff", "#438EDB", "#2A5CAA", "#F5F5F5", "#D32F2F", "#00A651"].map((color) => <button key={color} type="button" className="color-button" style={{ backgroundColor: color }} aria-label={`背景色 ${color}`} onClick={() => setBackground(color)} />)}<label className="color-button custom-color" style={{ background: "conic-gradient(red, yellow, lime, cyan, blue, magenta, red)", position: "relative", overflow: "hidden", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }} aria-label="自定义背景色"><span style={{ pointerEvents: "none", position: "relative", zIndex: 1, fontSize: "22px", color: "white", textShadow: "0 1px 3px #000" }}>＋</span><input ref={colorInputRef} type="color" value={background} onChange={(e) => setBackground(e.target.value)} aria-label="打开调色盘" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer", border: 0, padding: 0 }} /></label></div><div className="hint">点击彩色“＋”直接打开调色盘，自由选择任意背景色。</div><button className="download" onClick={download}>下载证件照</button></section>}
     </main>
   );
 }
