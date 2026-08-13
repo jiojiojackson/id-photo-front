@@ -8,8 +8,10 @@ Set:
 
 - `LIGHTNING_API_URL`
 - `LIGHTNING_API_KEY`
+- `ADMIN_USERNAME` (The administrative account username, defaults to `admin` if not configured)
+- `ADMIN_PASSWORD` (The administrative account password, defaults to `admin` if not configured)
 
-Do not use `NEXT_PUBLIC_` for the API key. The key is only used by the Vercel server route.
+Do not use `NEXT_PUBLIC_` for the API key, username, or password. These variables are only used by the Vercel server route and middleware.
 
 ## Local
 
@@ -20,4 +22,4 @@ npm run dev
 
 ## Deploy
 
-Import this repository into Vercel and set the two environment variables.
+Import this repository into Vercel and set the environment variables.

@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 
 const PRESETS = [
   { name: "标准 295×413", width: 295, height: 413 },
@@ -11,6 +12,7 @@ const PRESETS = [
 export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const router = useRouter();
 
   const [file, setFile] = useState<File | null>(null);
   const [originalPreview, setOriginalPreview] = useState("");
@@ -21,6 +23,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [resultSize, setResultSize] = useState("");
+  const [loggingOut, setLoggingOut] = useState(false);
 
   function handleFile(selected: File) {
     if (originalPreview) URL.revokeObjectURL(originalPreview);
@@ -111,9 +114,41 @@ export default function Home() {
     }, "image/png");
   }
 
+  async function handleLogout() {
+    setLoggingOut(true);
+    try {
+      const response = await fetch("/api/auth/logout", { method: "POST" });
+      if (response.ok) {
+        router.push("/login");
+      }
+    } catch (err) {
+      console.error("退出登录失败:", err);
+    } finally {
+      setLoggingOut(false);
+    }
+  }
+
   return (
     <main className="container">
-      <h1>AI 证件照</h1>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+        <h1 style={{ margin: 0 }}>AI 证件照</h1>
+        <button
+          onClick={handleLogout}
+          disabled={loggingOut}
+          style={{
+            background: "#fee2e2",
+            color: "#991b1b",
+            border: "none",
+            borderRadius: "8px",
+            padding: "8px 16px",
+            fontSize: "14px",
+            fontWeight: "600",
+            cursor: "pointer"
+          }}
+        >
+          {loggingOut ? "正在退出..." : "退出登录"}
+        </button>
+      </div>
       <p className="subtitle">上传照片 → AI 生成高清证件照 → 设置背景色 → 下载</p>
 
       <section className="card">
