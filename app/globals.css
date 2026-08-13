@@ -1,0 +1,61 @@
+* { box-sizing: border-box; }
+html, body { padding: 0; margin: 0; }
+body {
+  background: #f5f5f5;
+  color: #222;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+button, input { font: inherit; }
+.container { width: 100%; max-width: 620px; margin: 0 auto; padding: 20px 16px 50px; }
+h1 { margin: 10px 0 6px; font-size: 30px; }
+h2 { margin-top: 0; font-size: 20px; }
+.subtitle { margin-top: 0; margin-bottom: 24px; color: #666; line-height: 1.5; }
+.card {
+  background: white; border-radius: 16px; padding: 18px; margin-bottom: 16px;
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.06);
+}
+.primary, .generate, .download {
+  width: 100%; border: none; border-radius: 12px; padding: 14px 16px;
+  font-size: 17px; font-weight: 600; cursor: pointer;
+}
+.primary { background: #111; color: white; }
+.generate { background: #2563eb; color: white; }
+.generate:disabled { opacity: 0.45; cursor: not-allowed; }
+.download { margin-top: 16px; background: #111; color: white; }
+.preview { margin-top: 16px; display: flex; justify-content: center; }
+.preview img { width: 100%; max-height: 360px; object-fit: contain; border-radius: 12px; }
+.preset-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.preset {
+  background: #f2f2f2; border: 2px solid transparent; border-radius: 10px;
+  padding: 12px 8px; cursor: pointer; text-align: center;
+}
+.preset.active { border-color: #2563eb; background: #eff6ff; }
+.size-row {
+  display: flex; align-items: end; justify-content: center; gap: 10px; margin-top: 18px;
+}
+.size-row label { display: flex; flex-direction: column; gap: 6px; flex: 1; }
+.size-row input { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 8px; }
+.size-row span { padding-bottom: 11px; }
+.hint { color: #777; font-size: 13px; margin-top: 8px; }
+.error { margin-top: 12px; padding: 12px; background: #fee2e2; color: #991b1b; border-radius: 10px; }
+.result-preview {
+  margin-top: 16px; display: flex; justify-content: center; padding: 20px;
+  background: repeating-conic-gradient(#eee 0% 25%, white 0% 50%) 50% / 20px 20px;
+}
+.result-preview canvas {
+  display: block; max-width: 100%; max-height: 600px; width: auto; height: auto;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.18);
+}
+.background-row { display: flex; align-items: center; gap: 12px; margin-top: 20px; }
+.background-row input[type="color"] { width: 48px; height: 40px; border: none; padding: 0; background: transparent; }
+.background-row span { font-family: monospace; color: #555; }
+.color-grid { display: flex; gap: 10px; margin-top: 14px; }
+.color-button {
+  width: 38px; height: 38px; border-radius: 50%; border: 2px solid white;
+  box-shadow: 0 0 0 1px #ccc; cursor: pointer;
+}
+@media (max-width: 480px) {
+  .container { padding: 16px 12px 40px; }
+  .preset-grid { grid-template-columns: 1fr 1fr; }
+  h1 { font-size: 26px; }
+}

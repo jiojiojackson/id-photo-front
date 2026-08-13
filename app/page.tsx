@@ -1,0 +1,220 @@
+"use client";
+
+import { ChangeEvent, useEffect, useRef, useState } from "react";
+
+const PRESETS = [
+  { name: "标准 295×413", width: 295, height: 413 },
+  { name: "600×800", width: 600, height: 800 },
+  { name: "300×400", width: 300, height: 400 },
+];
+
+export default function Home() {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  const [file, setFile] = useState<File | null>(null);
+  const [originalPreview, setOriginalPreview] = useState("");
+  const [resultUrl, setResultUrl] = useState("");
+  const [width, setWidth] = useState(295);
+  const [height, setHeight] = useState(413);
+  const [background, setBackground] = useState("#ffffff");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [resultSize, setResultSize] = useState("");
+
+  function handleFile(selected: File) {
+    if (originalPreview) URL.revokeObjectURL(originalPreview);
+    if (resultUrl) URL.revokeObjectURL(resultUrl);
+    setFile(selected);
+    setError("");
+    setResultUrl("");
+    setResultSize("");
+    setOriginalPreview(URL.createObjectURL(selected));
+  }
+
+  function onFileChange(e: ChangeEvent<HTMLInputElement>) {
+    const selected = e.target.files?.[0];
+    if (selected) handleFile(selected);
+  }
+
+  async function generate() {
+    if (!file) {
+      setError("请选择照片");
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+    setResultUrl("");
+
+    try {
+      const formData = new FormData();
+      formData.append("image", file);
+      formData.append("width", String(width));
+      formData.append("height", String(height));
+
+      const response = await fetch("/api/generate", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => null);
+        throw new Error(data?.error || `生成失败 (${response.status})`);
+      }
+
+      const url = URL.createObjectURL(await response.blob());
+      setResultUrl(url);
+
+      const image = new Image();
+      image.onload = () => setResultSize(`${image.naturalWidth} × ${image.naturalHeight}`);
+      image.src = url;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "生成失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!resultUrl) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const image = new Image();
+    image.onload = () => {
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      ctx.fillStyle = background;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(image, 0, 0);
+    };
+    image.src = resultUrl;
+  }, [resultUrl, background]);
+
+  function download() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `idphoto-${width}x${height}.png`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }, "image/png");
+  }
+
+  return (
+    <main className="container">
+      <h1>AI 证件照</h1>
+      <p className="subtitle">上传照片 → AI 生成高清证件照 → 设置背景色 → 下载</p>
+
+      <section className="card">
+        <button className="primary" onClick={() => fileInputRef.current?.click()}>
+          {file ? "重新选择照片" : "选择照片"}
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          hidden
+          onChange={onFileChange}
+        />
+        {originalPreview && (
+          <div className="preview">
+            <img src={originalPreview} alt="原始照片" />
+          </div>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>照片尺寸</h2>
+        <div className="preset-grid">
+          {PRESETS.map((preset) => (
+            <button
+              key={preset.name}
+              className={width === preset.width && height === preset.height ? "preset active" : "preset"}
+              onClick={() => {
+                setWidth(preset.width);
+                setHeight(preset.height);
+              }}
+            >
+              <strong>{preset.name}</strong>
+            </button>
+          ))}
+        </div>
+
+        <div className="size-row">
+          <label>
+            宽度
+            <input
+              type="number"
+              min="100"
+              max="3000"
+              value={width}
+              onChange={(e) => setWidth(Number(e.target.value))}
+            />
+          </label>
+          <span>×</span>
+          <label>
+            高度
+            <input
+              type="number"
+              min="100"
+              max="3000"
+              value={height}
+              onChange={(e) => setHeight(Number(e.target.value))}
+            />
+          </label>
+        </div>
+        <div className="hint">单位：像素</div>
+      </section>
+
+      <section className="card">
+        <button className="generate" onClick={generate} disabled={!file || loading}>
+          {loading ? "正在生成……" : "生成证件照"}
+        </button>
+        {error && <div className="error">{error}</div>}
+      </section>
+
+      {resultUrl && (
+        <section className="card">
+          <h2>处理结果</h2>
+          {resultSize && <div className="hint">高清尺寸：{resultSize}</div>}
+
+          <div className="result-preview">
+            <canvas ref={canvasRef} />
+          </div>
+
+          <div className="background-row">
+            <label>背景色</label>
+            <input type="color" value={background} onChange={(e) => setBackground(e.target.value)} />
+            <span>{background}</span>
+          </div>
+
+          <div className="color-grid">
+            {["#ffffff", "#438EDB", "#2A5CAA", "#F5F5F5", "#D32F2F", "#00A651"].map((color) => (
+              <button
+                key={color}
+                className="color-button"
+                style={{ backgroundColor: color }}
+                aria-label={`背景色 ${color}`}
+                onClick={() => setBackground(color)}
+              />
+            ))}
+          </div>
+
+          <button className="download" onClick={download}>下载证件照</button>
+        </section>
+      )}
+    </main>
+  );
+}
