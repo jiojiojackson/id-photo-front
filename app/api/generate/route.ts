@@ -37,6 +37,13 @@ export async function POST(request: NextRequest) {
 
     if (!response.ok) {
       const text = await response.text();
+      if (response.status === 413) {
+        return NextResponse.json(
+          { error: "Lightning API 拒绝了请求：上传图片过大，请使用较小的照片重试" },
+          { status: 413 }
+        );
+      }
+
       return NextResponse.json(
         { error: text || `Lightning API error: ${response.status}` },
         { status: response.status }
