@@ -178,7 +178,7 @@ export default function Home() {
 
       <section className="card">
         <button className="primary" onClick={() => fileInputRef.current?.click()}>{file ? "重新选择照片" : "选择照片"}</button>
-        <input ref={fileInputRef} type="file" accept="image/*" capture="environment" hidden onChange={onFileChange} />
+        <input ref={fileInputRef} type="file" accept="image/*" hidden onChange={onFileChange} />
         {originalPreview && <div className="preview"><img src={originalPreview} alt="原始照片" /></div>}
         {file && <div className="hint">原图大小：{formatBytes(file.size)}，生成时会自动压缩至 2 MB 以内</div>}
       </section>
