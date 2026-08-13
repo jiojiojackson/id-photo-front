@@ -11,6 +11,8 @@ const PRESETS = [
 
 const MAX_IMAGE_DIMENSION = 2000;
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
+const REQUEST_TIMEOUT_MS = 90_000;
+const RETRY_DELAYS_MS = [0, 5_000, 10_000];
 
 function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
@@ -55,20 +57,82 @@ async function compressImage(file: File): Promise<File> {
   return new File([blob], "id-photo-upload.jpg", { type: "image/jpeg", lastModified: Date.now() });
 }
 
+function normalizeDimension(value: string, fallback: number) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(3000, Math.max(100, parsed));
+}
+
+async function wait(ms: number) {
+  if (ms > 0) await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function requestGenerate(formData: FormData, onRetry: (message: string) => void) {
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt += 1) {
+    await wait(RETRY_DELAYS_MS[attempt]);
+    if (attempt > 0) {
+      onRetry(`服务器正在启动，正在重试（${attempt + 1}/${RETRY_DELAYS_MS.length}）…`);
+    }
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      const response = await fetch("/api/generate", {
+        method: "POST",
+        body: formData,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timer);
+
+      // 413 属于请求本身的问题，不应该重复发送。
+      if (response.status === 413) return response;
+
+      // 冷启动常见的网关错误，等待后重新请求。
+      if ([502, 503, 504].includes(response.status) && attempt < RETRY_DELAYS_MS.length - 1) {
+        lastError = new Error(`服务器暂时不可用 (${response.status})`);
+        continue;
+      }
+
+      return response;
+    } catch (error) {
+      clearTimeout(timer);
+      lastError = error;
+
+      if (attempt < RETRY_DELAYS_MS.length - 1) continue;
+      break;
+    }
+  }
+
+  if (lastError instanceof DOMException && lastError.name === "AbortError") {
+    throw new Error("服务器响应超时，请稍后再试。首次生成可能需要较长时间唤醒服务器。");
+  }
+
+  throw new Error("服务器暂时无法连接，请稍后再试。");
+}
+
 export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const colorInputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
   const [originalPreview, setOriginalPreview] = useState("");
   const [resultUrl, setResultUrl] = useState("");
-  const [width, setWidth] = useState(295);
-  const [height, setHeight] = useState(413);
+  const [widthInput, setWidthInput] = useState("295");
+  const [heightInput, setHeightInput] = useState("413");
   const [background, setBackground] = useState("#ffffff");
   const [loading, setLoading] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState("");
   const [error, setError] = useState("");
   const [resultSize, setResultSize] = useState("");
   const [loggingOut, setLoggingOut] = useState(false);
+
+  const width = normalizeDimension(widthInput, 295);
+  const height = normalizeDimension(heightInput, 413);
 
   function handleFile(selected: File) {
     if (originalPreview) URL.revokeObjectURL(originalPreview);
@@ -85,13 +149,33 @@ export default function Home() {
     if (selected) handleFile(selected);
   }
 
+  function selectPreset(presetWidth: number, presetHeight: number) {
+    setWidthInput(String(presetWidth));
+    setHeightInput(String(presetHeight));
+    setError("");
+  }
+
+  function commitWidth() {
+    setWidthInput(String(normalizeDimension(widthInput, 295)));
+  }
+
+  function commitHeight() {
+    setHeightInput(String(normalizeDimension(heightInput, 413)));
+  }
+
   async function generate() {
     if (!file) {
       setError("请选择照片");
       return;
     }
 
+    const finalWidth = normalizeDimension(widthInput, 295);
+    const finalHeight = normalizeDimension(heightInput, 413);
+    setWidthInput(String(finalWidth));
+    setHeightInput(String(finalHeight));
+
     setLoading(true);
+    setLoadingMessage("正在连接服务器…");
     setError("");
     setResultUrl("");
 
@@ -99,10 +183,12 @@ export default function Home() {
       const compressedFile = await compressImage(file);
       const formData = new FormData();
       formData.append("image", compressedFile);
-      formData.append("width", String(width));
-      formData.append("height", String(height));
+      formData.append("width", String(finalWidth));
+      formData.append("height", String(finalHeight));
 
-      const response = await fetch("/api/generate", { method: "POST", body: formData });
+      setLoadingMessage("正在生成证件照，首次生成可能需要唤醒服务器…");
+      const response = await requestGenerate(formData, setLoadingMessage);
+
       if (!response.ok) {
         const data = await response.json().catch(() => null);
         if (response.status === 413) throw new Error("照片请求过大，请选择较小的照片后重试");
@@ -118,6 +204,7 @@ export default function Home() {
       setError(err instanceof Error ? err.message : "生成失败");
     } finally {
       setLoading(false);
+      setLoadingMessage("");
     }
   }
 
@@ -187,21 +274,22 @@ export default function Home() {
         <h2>照片尺寸</h2>
         <div className="preset-grid">
           {PRESETS.map((preset) => (
-            <button key={preset.name} className={width === preset.width && height === preset.height ? "preset active" : "preset"} onClick={() => { setWidth(preset.width); setHeight(preset.height); }}>
+            <button key={preset.name} className={width === preset.width && height === preset.height ? "preset active" : "preset"} onClick={() => selectPreset(preset.width, preset.height)}>
               <strong>{preset.name}</strong>
             </button>
           ))}
         </div>
         <div className="size-row">
-          <label>宽度<input type="number" min="100" max="3000" value={width} onChange={(e) => setWidth(Number(e.target.value))} /></label>
+          <label>宽度<input type="number" min="100" max="3000" inputMode="numeric" value={widthInput} onChange={(e) => setWidthInput(e.target.value.replace(/[^0-9]/g, ""))} onBlur={commitWidth} /></label>
           <span>×</span>
-          <label>高度<input type="number" min="100" max="3000" value={height} onChange={(e) => setHeight(Number(e.target.value))} /></label>
+          <label>高度<input type="number" min="100" max="3000" inputMode="numeric" value={heightInput} onChange={(e) => setHeightInput(e.target.value.replace(/[^0-9]/g, ""))} onBlur={commitHeight} /></label>
         </div>
-        <div className="hint">单位：像素</div>
+        <div className="hint">单位：像素（100–3000）</div>
       </section>
 
       <section className="card">
-        <button className="generate" onClick={generate} disabled={!file || loading}>{loading ? "正在生成……" : "生成证件照"}</button>
+        <button className="generate" onClick={generate} disabled={!file || loading}>{loading ? (loadingMessage || "正在生成……") : "生成证件照"}</button>
+        {loading && <div className="hint" style={{ marginTop: "10px", textAlign: "center" }}>首次生成可能需要等待几十秒，请不要关闭页面。</div>}
         {error && <div className="error">{error}</div>}
       </section>
 
@@ -211,13 +299,17 @@ export default function Home() {
           {resultSize && <div className="hint">高清尺寸：{resultSize}</div>}
           <div className="result-preview"><canvas ref={canvasRef} /></div>
           <div className="background-row">
-            <label>背景色</label><input type="color" value={background} onChange={(e) => setBackground(e.target.value)} /><span>{background}</span>
+            <label>背景色</label>
+            <input ref={colorInputRef} type="color" value={background} onChange={(e) => setBackground(e.target.value)} aria-label="自定义背景色" />
+            <span>{background}</span>
           </div>
           <div className="color-grid">
             {["#ffffff", "#438EDB", "#2A5CAA", "#F5F5F5", "#D32F2F", "#00A651"].map((color) => (
               <button key={color} className="color-button" style={{ backgroundColor: color }} aria-label={`背景色 ${color}`} onClick={() => setBackground(color)} />
             ))}
+            <button className="color-button custom-color" style={{ background: `conic-gradient(#f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00)` }} aria-label="自定义背景色" onClick={() => colorInputRef.current?.click()}>✚</button>
           </div>
+          <div className="hint">点击彩色“＋”可打开调色盘，自由选择任意背景色。</div>
           <button className="download" onClick={download}>下载证件照</button>
         </section>
       )}
