@@ -4,20 +4,8 @@ import { sql } from "@/lib/db";
 export const runtime = "nodejs";
 
 function authorized(request: NextRequest) {
-  const expected = process.env.LIGHTNING_WORKER_TOKEN;
+  const expected = process.env.LIGHTNING_API_KEY;
   return Boolean(expected && request.headers.get("authorization") === `Bearer ${expected}`);
-}
-
-export async function GET(request: NextRequest, { params }: { params: Promise<{ jobId: string }> }) {
-  if (!authorized(request)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const { jobId } = await params;
-  const rows = await sql`
-    SELECT id, request_id, width, height, unit, dpi, background,
-           input_key, output_key, input_url, output_url, url_expires_at, status
-    FROM photo_jobs WHERE id = ${jobId}
-  `;
-  if (!rows.length) return NextResponse.json({ error: "Job not found" }, { status: 404 });
-  return NextResponse.json({ job: rows[0] });
 }
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ jobId: string }> }) {
