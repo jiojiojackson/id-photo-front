@@ -5,14 +5,7 @@ import { receive, PHOTO_QUEUE_CONSUMER, PHOTO_QUEUE_NAME } from "@/lib/queue";
 
 export const runtime = "nodejs";
 
-function authorized(request: NextRequest) {
-  const expected = process.env.LIGHTNING_API_KEY;
-  return Boolean(expected && request.headers.get("authorization") === `Bearer ${expected}`);
-}
-
-export async function GET(request: NextRequest) {
-  if (!authorized(request)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
+export async function GET(_request: NextRequest) {
   let selectedJob: any = null;
 
   const result = await receive(
@@ -32,13 +25,11 @@ export async function GET(request: NextRequest) {
 
       const job = rows[0];
       if (job.status !== "queued") {
-        // Already handled/claimed elsewhere. ACK this duplicate message safely.
         selectedJob = { jobId: String(job.id), skip: true, status: job.status };
         return;
       }
 
-      // Presigned URLs are created only when Lightning actually asks for the job,
-      // so they cannot expire while the user is waiting in the queue.
+      // Presigned URLs are created only when Lightning actually asks for the job.
       const inputUrl = await createPresignedUrl("GET", job.input_key, 30 * 60);
       const outputUrl = await createPresignedUrl("PUT", job.output_key, 30 * 60);
       await sql`
@@ -64,7 +55,6 @@ export async function GET(request: NextRequest) {
     { limit: 1, visibilityTimeoutSeconds: 300 },
   );
 
-  if (!result.ok) return new NextResponse(null, { status: 204 });
-  if (!selectedJob) return new NextResponse(null, { status: 204 });
+  if (!result.ok || !selectedJob) return new NextResponse(null, { status: 204 });
   return NextResponse.json({ job: selectedJob });
 }
