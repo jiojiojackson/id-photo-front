@@ -7,9 +7,8 @@ export const runtime = "nodejs";
 export async function POST(request: NextRequest) {
   try {
     const lightningUrl = process.env.LIGHTNING_API_URL;
-    const lightningKey = process.env.LIGHTNING_API_KEY;
-    if (!lightningUrl || !lightningKey) {
-      return NextResponse.json({ error: "LIGHTNING_API_URL / LIGHTNING_API_KEY 未配置" }, { status: 500 });
+    if (!lightningUrl) {
+      return NextResponse.json({ error: "LIGHTNING_API_URL 未配置" }, { status: 500 });
     }
 
     const claimed = await sql.begin(async (tx) => {
@@ -39,21 +38,16 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ status: claimed.reason, queued: claimed.jobs }, { status: 200 });
     }
 
-    // Re-publish all DB-queued jobs before waking Lightning. The idempotency key
-    // makes this safe if a previous queue publish succeeded but the request failed.
-    // It also repairs a job whose queue message was consumed just before a worker crash.
     for (const jobId of claimed.jobs) {
       await enqueueJob(jobId);
     }
 
-    const bridgeUrl = new URL("/api/worker", request.url).origin;
+    // Lightning's platform-managed endpoint handles its own authentication.
+    // The application only needs the deployed endpoint URL and the worker path.
     const wakeResponse = await fetch(lightningUrl, {
       method: "POST",
-      headers: {
-        "X-API-Key": lightningKey,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ bridgeUrl }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bridgeUrl: new URL("/api/worker", request.url).origin }),
       cache: "no-store",
     });
 
