@@ -14,6 +14,7 @@ const FALLBACK_SECONDS_PER_JOB = 45;
 
 type Size = { width: number; height: number };
 type Job = { id: string; width: number; height: number; status: string; resultUrl: string | null; error?: string | null };
+type TimedJob = Job & { processing_time_ms?: number };
 
 function formatBytes(bytes: number) { return `${(bytes / 1024 / 1024).toFixed(2)} MB`; }
 
@@ -73,8 +74,10 @@ export default function Home() {
       setCounts(data.counts); setQueued(data.counts.queued); setWorkerStatus(data.worker?.status || "idle"); setJobs(data.jobs || []);
       const finished = (data.jobs || []).filter((j: Job) => j.status === "completed");
       if (finished.length) {
-        const times = (data.jobs || []).map((j: Job & { processing_time_ms?: number }) => j.processing_time_ms).filter((n: unknown): n is number => typeof n === "number" && n > 0);
-        if (times.length) setAvgSeconds(Math.max(5, times.reduce((a, b) => a + b, 0) / times.length / 1000));
+        const times: number[] = (data.jobs || [])
+          .map((j: TimedJob) => j.processing_time_ms)
+          .filter((n: number | undefined): n is number => typeof n === "number" && n > 0);
+        if (times.length) setAvgSeconds(Math.max(5, times.reduce((a: number, b: number) => a + b, 0) / times.length / 1000));
       }
     } catch { /* transient polling failure */ }
   }
