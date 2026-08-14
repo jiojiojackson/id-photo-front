@@ -1,15 +1,9 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 
 export const runtime = "nodejs";
 
-function authorized(request: NextRequest) {
-  const expected = process.env.LIGHTNING_API_KEY;
-  return Boolean(expected && request.headers.get("authorization") === `Bearer ${expected}`);
-}
-
-export async function POST(request: NextRequest, { params }: { params: Promise<{ jobId: string }> }) {
-  if (!authorized(request)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+export async function POST(request: Request, { params }: { params: Promise<{ jobId: string }> }) {
   const { jobId } = await params;
   const body = await request.json().catch(() => ({}));
   const status = body.status === "completed" ? "completed" : body.status === "failed" ? "failed" : null;
