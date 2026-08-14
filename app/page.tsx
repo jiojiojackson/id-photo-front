@@ -13,7 +13,7 @@ const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
 const FALLBACK_SECONDS_PER_JOB = 45;
 
 type Size = { width: number; height: number };
-type Job = { id: string; width: number; height: number; status: string; resultUrl: string | null; error?: string | null };
+type Job = { id: string; width: number; height: number; unit?: string; status: string; resultUrl: string | null; error?: string | null };
 type TimedJob = Job & { processing_time_ms?: number };
 
 function formatBytes(bytes: number) { return `${(bytes / 1024 / 1024).toFixed(2)} MB`; }
@@ -182,7 +182,7 @@ export default function Home() {
         {!jobs.length && <div className="hint">暂无任务。</div>}
         {jobs.map((job) => (
           <div key={job.id} style={{ borderTop: "1px solid #e5e7eb", padding: "12px 0" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}><strong>{job.width} × {job.height} {job.unit}</strong><span>{job.status === "queued" ? "等待中" : job.status === "processing" ? "处理中" : job.status === "completed" ? "✓ 完成" : "✕ 失败"}</span></div>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}><strong>{job.width} × {job.height}{job.unit ? ` ${job.unit}` : ""}</strong><span>{job.status === "queued" ? "等待中" : job.status === "processing" ? "处理中" : job.status === "completed" ? "✓ 完成" : "✕ 失败"}</span></div>
             {job.resultUrl && <img src={job.resultUrl} alt={`${job.width}×${job.height}`} style={{ maxWidth: 220, marginTop: 10, borderRadius: 8 }} />}
             {job.resultUrl && <div><a className="download" href={job.resultUrl} target="_blank" rel="noreferrer">查看 / 下载</a></div>}
             {job.error && <div className="error">{job.error}</div>}
