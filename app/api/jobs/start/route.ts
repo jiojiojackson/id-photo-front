@@ -7,14 +7,15 @@ export const runtime = "nodejs";
 export async function POST(request: NextRequest) {
   try {
     const lightningUrl = process.env.LIGHTNING_API_URL;
-    if (!lightningUrl) {
-      return NextResponse.json({ error: "LIGHTNING_API_URL 未配置" }, { status: 500 });
+    const lightningKey = process.env.LIGHTNING_API_KEY;
+    if (!lightningUrl || !lightningKey) {
+      return NextResponse.json({ error: "LIGHTNING_API_URL 或 LIGHTNING_API_KEY 未配置" }, { status: 500 });
     }
 
     const claimed = await sql.begin(async (tx) => {
       const state = await tx`SELECT status FROM photo_worker_state WHERE id = 1 FOR UPDATE`;
       if (state[0]?.status !== "idle") {
-        return { started: false, reason: "already_running" as const, jobs: 0 };
+        return { started: false, reason: "already_running" as const, jobs: [] as string[] };
       }
 
       const jobs = await tx`
@@ -24,7 +25,7 @@ export async function POST(request: NextRequest) {
         ORDER BY created_at ASC
         FOR UPDATE SKIP LOCKED
       `;
-      if (!jobs.length) return { started: false, reason: "empty" as const, jobs: 0 };
+      if (!jobs.length) return { started: false, reason: "empty" as const, jobs: [] as string[] };
 
       await tx`
         UPDATE photo_worker_state
@@ -35,18 +36,22 @@ export async function POST(request: NextRequest) {
     });
 
     if (!claimed.started) {
-      return NextResponse.json({ status: claimed.reason, queued: claimed.jobs }, { status: 200 });
+      return NextResponse.json({ status: claimed.reason, queued: claimed.jobs.length }, { status: 200 });
     }
 
     for (const jobId of claimed.jobs) {
       await enqueueJob(jobId);
     }
 
-    // Lightning's platform-managed endpoint handles its own authentication.
-    // The application only needs the deployed endpoint URL and the worker path.
+    // Lightning's platform provides the API key. Vercel sends it only when
+    // waking the deployed Lightning endpoint; Lightning application code does
+    // not implement or validate this authentication itself.
     const wakeResponse = await fetch(lightningUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${lightningKey}`,
+      },
       body: JSON.stringify({ bridgeUrl: new URL("/api/worker", request.url).origin }),
       cache: "no-store",
     });
