@@ -8,11 +8,12 @@ const PRESETS = [
   { name: "600×800", width: 600, height: 800 },
   { name: "300×400", width: 300, height: 400 },
 ];
-
 const MAX_IMAGE_DIMENSION = 2000;
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
-const REQUEST_TIMEOUT_MS = 90_000;
-const RETRY_DELAYS_MS = [0, 5_000, 10_000];
+const FALLBACK_SECONDS_PER_JOB = 45;
+
+type Size = { width: number; height: number };
+type Job = { id: string; width: number; height: number; status: string; resultUrl: string | null; error?: string | null };
 
 function formatBytes(bytes: number) { return `${(bytes / 1024 / 1024).toFixed(2)} MB`; }
 
@@ -21,8 +22,7 @@ async function compressImage(file: File): Promise<File> {
   let width = bitmap.width, height = bitmap.height;
   if (width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION) {
     const scale = Math.min(MAX_IMAGE_DIMENSION / width, MAX_IMAGE_DIMENSION / height);
-    width = Math.max(1, Math.round(width * scale));
-    height = Math.max(1, Math.round(height * scale));
+    width = Math.max(1, Math.round(width * scale)); height = Math.max(1, Math.round(height * scale));
   }
   const canvas = document.createElement("canvas"); canvas.width = width; canvas.height = height;
   const ctx = canvas.getContext("2d");
@@ -31,108 +31,161 @@ async function compressImage(file: File): Promise<File> {
   let quality = 0.85, blob: Blob | null = null;
   for (let i = 0; i < 6; i += 1) {
     blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
-    if (!blob) throw new Error("图片压缩失败");
-    if (blob.size <= MAX_UPLOAD_BYTES) break;
+    if (!blob || blob.size <= MAX_UPLOAD_BYTES) break;
     quality -= 0.1;
   }
-  if (!blob || blob.size > MAX_UPLOAD_BYTES) throw new Error("照片压缩后仍然超过 2 MB，请选择尺寸较小的照片");
+  if (!blob || blob.size > MAX_UPLOAD_BYTES) throw new Error("照片压缩后仍然超过 2 MB");
   return new File([blob], "id-photo-upload.jpg", { type: "image/jpeg", lastModified: Date.now() });
 }
 
-function normalizeDimension(value: string, fallback: number) {
-  if (!value.trim()) return fallback;
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(3000, Math.max(100, parsed));
-}
-
-async function wait(ms: number) { if (ms > 0) await new Promise((resolve) => setTimeout(resolve, ms)); }
-
-async function requestGenerate(formData: FormData, onRetry: (message: string) => void) {
-  let lastError: unknown = null;
-  for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt += 1) {
-    await wait(RETRY_DELAYS_MS[attempt]);
-    if (attempt > 0) onRetry(`服务器正在启动，正在重试（${attempt + 1}/${RETRY_DELAYS_MS.length}）…`);
-    const controller = new AbortController(); const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-    try {
-      const response = await fetch("/api/generate", { method: "POST", body: formData, signal: controller.signal });
-      clearTimeout(timer);
-      if (response.status === 413) return response;
-      if ([502, 503, 504].includes(response.status) && attempt < RETRY_DELAYS_MS.length - 1) { lastError = new Error(`服务器暂时不可用 (${response.status})`); continue; }
-      return response;
-    } catch (error) {
-      clearTimeout(timer); lastError = error;
-      if (attempt < RETRY_DELAYS_MS.length - 1) continue;
-      break;
-    }
-  }
-  if (lastError instanceof DOMException && lastError.name === "AbortError") throw new Error("服务器响应超时，请稍后再试。首次生成可能需要较长时间唤醒服务器。");
-  throw new Error("服务器暂时无法连接，请稍后再试。");
+function normalize(value: string, fallback: number) {
+  const n = Number.parseInt(value, 10);
+  return Number.isFinite(n) ? Math.min(3000, Math.max(100, n)) : fallback;
 }
 
 export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const colorInputRef = useRef<HTMLInputElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
-  const [originalPreview, setOriginalPreview] = useState("");
-  const [resultUrl, setResultUrl] = useState("");
-  const [widthInput, setWidthInput] = useState("295");
-  const [heightInput, setHeightInput] = useState("413");
+  const [preview, setPreview] = useState("");
+  const [sizes, setSizes] = useState<Size[]>([
+    { width: 295, height: 413 },
+    { width: 600, height: 800 },
+    { width: 300, height: 400 },
+  ]);
   const [background, setBackground] = useState("#ffffff");
-  const [loading, setLoading] = useState(false);
-  const [loadingMessage, setLoadingMessage] = useState("");
+  const [dpi, setDpi] = useState(300);
+  const [submitting, setSubmitting] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
-  const [resultSize, setResultSize] = useState("");
+  const [queued, setQueued] = useState(0);
+  const [counts, setCounts] = useState({ queued: 0, processing: 0, completed: 0, failed: 0, total: 0 });
+  const [workerStatus, setWorkerStatus] = useState("idle");
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [avgSeconds, setAvgSeconds] = useState(FALLBACK_SECONDS_PER_JOB);
   const [loggingOut, setLoggingOut] = useState(false);
-  const width = normalizeDimension(widthInput, 295), height = normalizeDimension(heightInput, 413);
 
-  function handleFile(selected: File) {
-    if (originalPreview) URL.revokeObjectURL(originalPreview);
-    if (resultUrl) URL.revokeObjectURL(resultUrl);
-    setFile(selected); setError(""); setResultUrl(""); setResultSize(""); setOriginalPreview(URL.createObjectURL(selected));
-  }
-  function onFileChange(e: ChangeEvent<HTMLInputElement>) { const selected = e.target.files?.[0]; if (selected) handleFile(selected); }
-  function selectPreset(w: number, h: number) { setWidthInput(String(w)); setHeightInput(String(h)); setError(""); }
-  function commitWidth() { if (widthInput.trim()) setWidthInput(String(normalizeDimension(widthInput, 295))); }
-  function commitHeight() { if (heightInput.trim()) setHeightInput(String(normalizeDimension(heightInput, 413))); }
-
-  async function generate() {
-    if (!file) { setError("请选择照片"); return; }
-    const finalWidth = normalizeDimension(widthInput, 295), finalHeight = normalizeDimension(heightInput, 413);
-    setWidthInput(String(finalWidth)); setHeightInput(String(finalHeight)); setLoading(true); setLoadingMessage("正在连接服务器…"); setError(""); setResultUrl("");
+  async function refreshStatus() {
     try {
-      const compressedFile = await compressImage(file);
-      const formData = new FormData(); formData.append("image", compressedFile); formData.append("width", String(finalWidth)); formData.append("height", String(finalHeight));
-      setLoadingMessage("正在生成证件照，首次生成可能需要唤醒服务器…");
-      const response = await requestGenerate(formData, setLoadingMessage);
-      if (!response.ok) { const data = await response.json().catch(() => null); if (response.status === 413) throw new Error("照片请求过大，请选择较小的照片后重试"); throw new Error(data?.error || `生成失败 (${response.status})`); }
-      const url = URL.createObjectURL(await response.blob()); setResultUrl(url);
-      const image = new Image(); image.onload = () => setResultSize(`${image.naturalWidth} × ${image.naturalHeight}`); image.src = url;
-    } catch (err) { setError(err instanceof Error ? err.message : "生成失败"); }
-    finally { setLoading(false); setLoadingMessage(""); }
+      const response = await fetch("/api/jobs/status", { cache: "no-store" });
+      if (!response.ok) return;
+      const data = await response.json();
+      setCounts(data.counts); setQueued(data.counts.queued); setWorkerStatus(data.worker?.status || "idle"); setJobs(data.jobs || []);
+      const finished = (data.jobs || []).filter((j: Job) => j.status === "completed");
+      if (finished.length) {
+        const times = (data.jobs || []).map((j: Job & { processing_time_ms?: number }) => j.processing_time_ms).filter((n: unknown): n is number => typeof n === "number" && n > 0);
+        if (times.length) setAvgSeconds(Math.max(5, times.reduce((a, b) => a + b, 0) / times.length / 1000));
+      }
+    } catch { /* transient polling failure */ }
   }
 
   useEffect(() => {
-    if (!resultUrl) return; const canvas = canvasRef.current; if (!canvas) return; const ctx = canvas.getContext("2d"); if (!ctx) return;
-    const image = new Image(); image.onload = () => { canvas.width = image.naturalWidth; canvas.height = image.naturalHeight; ctx.fillStyle = background; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.drawImage(image, 0, 0); }; image.src = resultUrl;
-  }, [resultUrl, background]);
+    refreshStatus();
+    const timer = window.setInterval(refreshStatus, 2500);
+    return () => window.clearInterval(timer);
+  }, []);
 
-  function download() {
-    const canvas = canvasRef.current; if (!canvas) return;
-    canvas.toBlob((blob) => { if (!blob) return; const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = `idphoto-${width}x${height}.png`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url); }, "image/png");
+  function handleFile(selected: File) {
+    if (preview) URL.revokeObjectURL(preview);
+    setFile(selected); setPreview(URL.createObjectURL(selected)); setError("");
   }
-  async function handleLogout() { setLoggingOut(true); try { const response = await fetch("/api/auth/logout", { method: "POST" }); if (response.ok) router.push("/login"); } catch (err) { console.error("退出登录失败:", err); } finally { setLoggingOut(false); } }
+  function onFileChange(e: ChangeEvent<HTMLInputElement>) { const selected = e.target.files?.[0]; if (selected) handleFile(selected); }
+  function setSize(index: number, key: keyof Size, value: string) {
+    setSizes((current) => current.map((s, i) => i === index ? { ...s, [key]: normalize(value, key === "width" ? s.width : s.height) } : s));
+  }
+  function applyPreset(index: number, preset: Size) { setSizes((current) => current.map((s, i) => i === index ? preset : s)); }
+
+  async function submitJobs() {
+    if (!file) { setError("请选择照片"); return; }
+    setSubmitting(true); setError("");
+    try {
+      const compressed = await compressImage(file);
+      const form = new FormData(); form.append("image", compressed); form.append("sizes", JSON.stringify(sizes)); form.append("dpi", String(dpi)); form.append("background", background);
+      const response = await fetch("/api/jobs/submit", { method: "POST", body: form });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(data?.error || `提交失败 (${response.status})`);
+      await refreshStatus();
+    } catch (err) { setError(err instanceof Error ? err.message : "提交任务失败"); }
+    finally { setSubmitting(false); }
+  }
+
+  async function startProcessing() {
+    if (!queued || workerStatus !== "idle") return;
+    setStarting(true); setError("");
+    try {
+      const response = await fetch("/api/jobs/start", { method: "POST" });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(data?.error || `启动失败 (${response.status})`);
+      await refreshStatus();
+    } catch (err) { setError(err instanceof Error ? err.message : "启动处理失败"); }
+    finally { setStarting(false); }
+  }
+
+  async function handleLogout() { setLoggingOut(true); try { const response = await fetch("/api/auth/logout", { method: "POST" }); if (response.ok) router.push("/login"); } finally { setLoggingOut(false); } }
+
+  const estimatedSeconds = Math.max(1, Math.ceil(queued * avgSeconds));
+  const estimate = estimatedSeconds < 60 ? `约 ${estimatedSeconds} 秒` : `约 ${Math.ceil(estimatedSeconds / 60)} 分钟`;
+  const canStart = queued > 0 && workerStatus === "idle" && !starting;
 
   return (
     <main className="container">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}><h1 style={{ margin: 0 }}>AI 证件照</h1><button onClick={handleLogout} disabled={loggingOut} style={{ background: "#fee2e2", color: "#991b1b", border: "none", borderRadius: "8px", padding: "8px 16px", fontSize: "14px", fontWeight: "600", cursor: "pointer" }}>{loggingOut ? "正在退出..." : "退出登录"}</button></div>
-      <p className="subtitle">上传照片 → AI 生成高清证件照 → 设置背景色 → 下载</p>
-      <section className="card"><button className="primary" onClick={() => fileInputRef.current?.click()}>{file ? "重新选择照片" : "选择照片"}</button><input ref={fileInputRef} type="file" accept="image/*" hidden onChange={onFileChange} />{originalPreview && <div className="preview"><img src={originalPreview} alt="原始照片" /></div>}{file && <div className="hint">原图大小：{formatBytes(file.size)}，生成时会自动压缩至 2 MB 以内</div>}</section>
-      <section className="card"><h2>照片尺寸</h2><div className="preset-grid">{PRESETS.map((preset) => <button key={preset.name} className={width === preset.width && height === preset.height ? "preset active" : "preset"} onClick={() => selectPreset(preset.width, preset.height)}><strong>{preset.name}</strong></button>)}</div><div className="size-row"><label>宽度<input type="number" min="100" max="3000" inputMode="numeric" value={widthInput} onChange={(e) => setWidthInput(e.target.value.replace(/[^0-9]/g, ""))} onBlur={commitWidth} /></label><span>×</span><label>高度<input type="number" min="100" max="3000" inputMode="numeric" value={heightInput} onChange={(e) => setHeightInput(e.target.value.replace(/[^0-9]/g, ""))} onBlur={commitHeight} /></label></div><div className="hint">单位：像素（100–3000）</div></section>
-      <section className="card"><button className="generate" onClick={generate} disabled={!file || loading}>{loading ? (loadingMessage || "正在生成……") : "生成证件照"}</button>{loading && <div className="hint" style={{ marginTop: "10px", textAlign: "center" }}>首次生成可能需要等待几十秒，请不要关闭页面。</div>}{error && <div className="error">{error}</div>}</section>
-      {resultUrl && <section className="card"><h2>处理结果</h2>{resultSize && <div className="hint">高清尺寸：{resultSize}</div>}<div className="result-preview"><canvas ref={canvasRef} /></div><div className="background-row"><label>背景色</label><span>{background}</span></div><div className="color-grid">{["#ffffff", "#438EDB", "#2A5CAA", "#F5F5F5", "#D32F2F", "#00A651"].map((color) => <button key={color} type="button" className="color-button" style={{ backgroundColor: color }} aria-label={`背景色 ${color}`} onClick={() => setBackground(color)} />)}<label className="color-button custom-color" style={{ background: "conic-gradient(red, yellow, lime, cyan, blue, magenta, red)", position: "relative", overflow: "hidden", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }} aria-label="自定义背景色"><span style={{ pointerEvents: "none", position: "relative", zIndex: 1, fontSize: "22px", color: "white", textShadow: "0 1px 3px #000" }}>＋</span><input ref={colorInputRef} type="color" value={background} onChange={(e) => setBackground(e.target.value)} aria-label="打开调色盘" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer", border: 0, padding: 0 }} /></label></div><div className="hint">点击彩色“＋”直接打开调色盘，自由选择任意背景色。</div><button className="download" onClick={download}>下载证件照</button></section>}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <h1 style={{ margin: 0 }}>AI 证件照</h1>
+        <button onClick={handleLogout} disabled={loggingOut} style={{ background: "#fee2e2", color: "#991b1b", border: "none", borderRadius: 8, padding: "8px 16px", fontWeight: 600 }}>{loggingOut ? "正在退出..." : "退出登录"}</button>
+      </div>
+      <p className="subtitle">先提交任务，攒好任务后再启动 AI 处理，节省 Lightning GPU 运行时间。</p>
+
+      <section className="card">
+        <h2>1. 照片</h2>
+        <button className="primary" onClick={() => fileInputRef.current?.click()}>{file ? "重新选择照片" : "选择照片"}</button>
+        <input ref={fileInputRef} type="file" accept="image/*" hidden onChange={onFileChange} />
+        {preview && <div className="preview"><img src={preview} alt="原始照片" /></div>}
+        {file && <div className="hint">原图：{formatBytes(file.size)}，提交时自动压缩到 2 MB 以内。</div>}
+      </section>
+
+      <section className="card">
+        <h2>2. 一次生成 3 个尺寸</h2>
+        {sizes.map((size, index) => (
+          <div key={index} style={{ marginBottom: 14 }}>
+            <div className="size-row">
+              <label>尺寸 {index + 1}<input type="number" min="100" max="3000" value={size.width} onChange={(e) => setSize(index, "width", e.target.value)} /></label>
+              <span>×</span>
+              <label>高度<input type="number" min="100" max="3000" value={size.height} onChange={(e) => setSize(index, "height", e.target.value)} /></label>
+            </div>
+            <div className="preset-grid">{PRESETS.map((preset) => <button key={preset.name} className={size.width === preset.width && size.height === preset.height ? "preset active" : "preset"} onClick={() => applyPreset(index, preset)}>{preset.name}</button>)}</div>
+          </div>
+        ))}
+        <div className="size-row"><label>DPI<input type="number" min="72" max="1200" value={dpi} onChange={(e) => setDpi(normalize(e.target.value, 300))} /></label><label>背景色<input type="text" value={background} onChange={(e) => setBackground(e.target.value)} /></label></div>
+        <div className="hint">三个尺寸会创建 3 个独立 Job，可以分别成功、失败和重试。</div>
+      </section>
+
+      <section className="card">
+        <h2>3. 任务队列</h2>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, textAlign: "center", marginBottom: 14 }}>
+          <div><strong style={{ fontSize: 24 }}>{counts.queued}</strong><div className="hint">待处理</div></div>
+          <div><strong style={{ fontSize: 24 }}>{counts.processing}</strong><div className="hint">处理中</div></div>
+          <div><strong style={{ fontSize: 24 }}>{counts.completed}</strong><div className="hint">已完成</div></div>
+        </div>
+        <button className="generate" onClick={submitJobs} disabled={!file || submitting}>{submitting ? "正在提交…" : "提交任务（加入队列）"}</button>
+        <button className="generate" onClick={startProcessing} disabled={!canStart} style={{ marginTop: 10, opacity: canStart ? 1 : 0.55 }}>
+          {starting || workerStatus === "starting" ? "正在唤醒 Lightning…" : workerStatus === "running" ? `处理中（${counts.processing} 个）` : queued ? `开始处理（${queued} 个任务）` : "开始处理（0 个任务）"}
+        </button>
+        <div className="hint" style={{ textAlign: "center", marginTop: 10 }}>{queued ? `根据历史处理速度，预计 ${estimate}。点击开始后才生成临时 R2 URL 并唤醒 Lightning。` : "可以先提交任务，等任务攒好后再开始处理。"}</div>
+        {error && <div className="error">{error}</div>}
+      </section>
+
+      <section className="card">
+        <h2>4. 结果</h2>
+        {!jobs.length && <div className="hint">暂无任务。</div>}
+        {jobs.map((job) => (
+          <div key={job.id} style={{ borderTop: "1px solid #e5e7eb", padding: "12px 0" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}><strong>{job.width} × {job.height} {job.unit}</strong><span>{job.status === "queued" ? "等待中" : job.status === "processing" ? "处理中" : job.status === "completed" ? "✓ 完成" : "✕ 失败"}</span></div>
+            {job.resultUrl && <img src={job.resultUrl} alt={`${job.width}×${job.height}`} style={{ maxWidth: 220, marginTop: 10, borderRadius: 8 }} />}
+            {job.resultUrl && <div><a className="download" href={job.resultUrl} target="_blank" rel="noreferrer">查看 / 下载</a></div>}
+            {job.error && <div className="error">{job.error}</div>}
+          </div>
+        ))}
+      </section>
     </main>
   );
 }
