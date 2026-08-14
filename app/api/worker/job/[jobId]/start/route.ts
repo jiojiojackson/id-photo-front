@@ -4,7 +4,7 @@ import { sql } from "@/lib/db";
 export const runtime = "nodejs";
 
 function authorized(request: NextRequest) {
-  const expected = process.env.LIGHTNING_WORKER_TOKEN;
+  const expected = process.env.LIGHTNING_API_KEY;
   return Boolean(expected && request.headers.get("authorization") === `Bearer ${expected}`);
 }
 
