@@ -1,10 +1,8 @@
 import { PollingQueueClient } from "@vercel/queue";
 
-// Keep the Queue topic and polling region as application configuration, not
-// user-managed environment variables. Poll mode requires a fixed region.
-export const PHOTO_QUEUE_NAME = "id-photo-jobs";
-export const PHOTO_QUEUE_CONSUMER = "lightning-worker";
-export const PHOTO_QUEUE_REGION = "iad1";
+export const PHOTO_QUEUE_NAME = process.env.VERCEL_QUEUE_NAME || "id-photo-jobs";
+export const PHOTO_QUEUE_CONSUMER = process.env.VERCEL_QUEUE_CONSUMER_GROUP || "lightning-worker";
+export const PHOTO_QUEUE_REGION = process.env.VERCEL_QUEUE_REGION || "iad1";
 
 const queue = new PollingQueueClient({
   region: PHOTO_QUEUE_REGION,
