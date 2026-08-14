@@ -7,7 +7,13 @@ function required(name: string) {
 }
 
 async function hmac(key: ArrayBuffer | Uint8Array, data: string): Promise<ArrayBuffer> {
-  const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  // Web Crypto's DOM typings require an ArrayBuffer-backed BufferSource here.
+  // Normalize Uint8Array<ArrayBufferLike> to a standalone ArrayBuffer so the
+  // code type-checks with the newer TypeScript lib.dom definitions used by Vercel.
+  const keyBytes = key instanceof ArrayBuffer ? new Uint8Array(key) : new Uint8Array(key);
+  const keyBuffer = new ArrayBuffer(keyBytes.byteLength);
+  new Uint8Array(keyBuffer).set(keyBytes);
+  const cryptoKey = await crypto.subtle.importKey("raw", keyBuffer, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return crypto.subtle.sign("HMAC", cryptoKey, encoder.encode(data));
 }
 
