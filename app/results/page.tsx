@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
 import AppShell from "@/components/AppShell";
 
 const COLORS = [
@@ -18,9 +17,8 @@ function hexToRgb(hex: string) {
 }
 
 export default function ResultsPage() {
-  const searchParams = useSearchParams();
-  const selectedId = searchParams.get("job");
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [selectedId, setSelectedId] = useState("");
   const [jobs, setJobs] = useState<Job[]>([]);
   const [selected, setSelected] = useState<Job | null>(null);
   const [color, setColor] = useState("#ffffff");
@@ -29,32 +27,36 @@ export default function ResultsPage() {
   const [error, setError] = useState("");
   const [downloadUrl, setDownloadUrl] = useState("");
 
-  async function load() {
-    setLoading(true); setError("");
-    try {
-      const response = await fetch("/api/jobs/status", { cache: "no-store" });
-      const data = await response.json().catch(() => null);
-      if (!response.ok) throw new Error(data?.error || `读取结果失败 (${response.status})`);
-      const completed = (data.jobs || []).filter((job: Job) => job.status === "completed" && job.resultUrl);
-      setJobs(completed);
-      setSelected(completed.find((job: Job) => job.id === selectedId) || completed[0] || null);
-    } catch (err) { setError(err instanceof Error ? err.message : "读取结果失败"); }
-    finally { setLoading(false); }
-  }
+  useEffect(() => {
+    setSelectedId(new URLSearchParams(window.location.search).get("job") || "");
+  }, []);
 
-  useEffect(() => { load(); }, [selectedId]);
+  useEffect(() => {
+    async function load() {
+      setLoading(true); setError("");
+      try {
+        const response = await fetch("/api/jobs/status", { cache: "no-store" });
+        const data = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(data?.error || `读取结果失败 (${response.status})`);
+        const completed = (data.jobs || []).filter((job: Job) => job.status === "completed" && job.resultUrl);
+        setJobs(completed);
+        setSelected(completed.find((job: Job) => job.id === selectedId) || completed[0] || null);
+      } catch (err) { setError(err instanceof Error ? err.message : "读取结果失败"); }
+      finally { setLoading(false); }
+    }
+    load();
+  }, [selectedId]);
 
   useEffect(() => {
     if (!selected) return;
-    setEditing(false); setDownloadUrl("");
+    setEditing(false); setDownloadUrl(""); setColor("#ffffff");
     const canvas = canvasRef.current;
     if (!canvas) return;
     const image = new Image();
     image.onload = () => {
       canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
       const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      ctx.drawImage(image, 0, 0);
+      if (ctx) ctx.drawImage(image, 0, 0);
     };
     image.src = `/api/jobs/image?jobId=${encodeURIComponent(selected.id)}`;
   }, [selected]);
