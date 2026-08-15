@@ -203,66 +203,92 @@ GPU inference 串行，不为每个 Job 重载模型。
 GET /api/jobs/status
 ```
 
-这会在 Lightning 推理期间持续消耗 Vercel/Neon/R2 资源，现已删除。
+新方案已经删除自动轮询。
 
-新方案：
+### 当前请求规则
 
-### 自动请求的必要场景
+- 页面打开：不请求。
+- 提交任务成功：刷新一次。
+- 开始处理成功/失败：刷新一次。
+- 用户点击“刷新任务状态”：请求一次。
+- Lightning 推理期间：默认不请求。
 
-- 提交任务成功后刷新一次。
-- 点击开始处理成功/失败后刷新一次。
+### 关于旧 Preview / 历史部署
 
-### 用户主动请求
+Vercel 历史 Deployment 本身不会在服务器后台自动执行浏览器里的 `setInterval`。原来的轮询代码运行在**访问该 Deployment 的浏览器页面**中。
 
-UI 提供：
+因此：
 
-```text
-刷新任务状态
-```
+- 如果旧 Preview 页面仍开着，它可能继续轮询。
+- 关闭旧标签页、刷新到最新 Preview，旧 JS 就停止。
+- 已经关闭的页面不会继续产生轮询。
+- 新版本不会产生轮询。
 
-用户需要查看 Worker 当前进度、结果时点击一次。
+如果需要强制阻止旧 Deployment 的访问，可以在 Vercel Dashboard 删除旧 Preview Deployment；但通常没有必要，关闭旧页面即可。
 
-### 禁止
+## 10. 手动清除历史记录
 
-- 禁止 `setInterval`。
-- 禁止页面打开后自动持续轮询。
-- 禁止后台每 2.5 秒查询状态。
-
-这意味着 Lightning inference 期间，前端默认不产生 `/api/jobs/status` 流量。
-
-## 10. 当前数据库重置
-
-为解决当前旧数据导致的：
+新增 API：
 
 ```text
-处理中 0 个
+POST /api/jobs/reset
 ```
 
-以及 Worker State 卡住的问题，新增：
+前端新增按钮：
 
 ```text
-scripts/reset-db.mjs
-npm run db:reset
+清除当前历史记录
 ```
 
-会事务性执行：
+点击后弹出确认：
+
+```text
+确定清除当前所有任务和历史记录吗？
+这会删除当前 Job、请求记录和 Worker Run，无法恢复。
+如果 Lightning 正在处理任务，请先确认它已经停止。
+```
+
+确认后由 Vercel API 在一个数据库 transaction 内执行：
 
 ```sql
 TRUNCATE TABLE photo_jobs, photo_requests, photo_worker_runs RESTART IDENTITY CASCADE;
 ```
 
-然后重置：
+并恢复：
 
 ```text
 photo_worker_state.status = idle
 photo_worker_state.active_run_id = NULL
 ```
 
-**绝对不能加入 `vercel-build`。** 这是一次性人工调试命令。
+清除成功后前端直接将当前 UI 恢复为：
 
-当前连接没有直接执行 Neon SQL 的能力，因此代码已提交，但没有伪造声称数据库已经被清空。部署后使用当前 Vercel `DATABASE_URL` 执行一次即可。
+```text
+queued = 0
+processing = 0
+completed = 0
+failed = 0
+jobs = []
+worker = idle
+```
 
-## 11. Migration
+### 安全注意
+
+当前属于开发/调试阶段，reset API 是全局清除功能。正式生产环境必须增加管理员权限或用户隔离，不能允许普通用户删除整个系统的任务历史。
+
+## 11. CLI 数据库重置
+
+仍保留：
+
+```bash
+npm run db:reset
+```
+
+用于没有前端访问权限时的调试恢复。
+
+**绝对不能加入 `vercel-build`。**
+
+## 12. Migration
 
 生产数据库结构由：
 
@@ -282,7 +308,7 @@ next build
 
 新的 schema 必须新增 migration，不能把 reset 操作加入 migration。
 
-## 12. 当前开发状态
+## 13. 当前开发状态
 
 ### 已完成
 
@@ -301,13 +327,14 @@ next build
 - Preview hostname 动态传递到 Lightning。
 - Lightning 后端使用 wake payload 的 `vercel_origin` 构造 Bridge 主机地址。
 - 前端取消 `/api/jobs/status` 自动轮询，改为手动刷新。
-- 添加一次性 `npm run db:reset` 调试命令。
+- 添加 CLI `npm run db:reset`。
+- 添加前端“清除当前历史记录”与 `POST /api/jobs/reset`。
 
 ### 下一步
 
 1. 部署最新 Frontend Preview。
-2. 清空当前 Neon 调试数据后回到初始状态。
-3. 确认页面不会自动请求 `/api/jobs/status`。
+2. 关闭旧 Preview 标签页，确保旧 JS 不再运行。
+3. 点击“清除当前历史记录”，确认数据库回到 idle/0 jobs。
 4. 提交 1 个任务，手动刷新确认 queued。
 5. 点击开始处理。
 6. Lightning 日志确认真实 Preview `vercel_origin`。
@@ -317,7 +344,7 @@ next build
 POST https://<当前-preview-host>/api/worker/next
 ```
 
-8. 如果不再 401，继续调试 R2 → inference → complete → finish。
+8. 如果不再 401，继续 R2 → inference → complete → finish。
 9. 完成 1 Job 后测试 3 Job 串行。
 10. 测试 heartbeat、lease recovery、重复 complete、fail/retry。
 11. 最后切回 Lightning Platform Wake 模式。
