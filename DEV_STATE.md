@@ -21,11 +21,29 @@
 - Job lease、attempt_count、worker_run_id、claimed_at、lease_expires_at。
 - complete/fail 使用 worker + lease 条件保护旧 Worker，complete 支持幂等。
 - Worker 崩溃后，下一次 `/api/jobs/start` 可恢复 lease 已过期 Job。
-- `plan.md` 已同步更新为当前真实架构，并明确 Queue ACK 的实现取舍。
-- **数据库 Migration 自动化**：新增 `db/migrations/001_initial.sql` 和 `scripts/migrate.mjs`。
+- 数据库 Migration 自动化：`db/migrations/001_initial.sql` + `scripts/migrate.mjs`。
 - Vercel 使用 `vercel-build`：先执行 `npm run db:migrate`，成功后才执行 `next build`。
 - Migration 使用 `schema_migrations` 记录版本，并使用 PostgreSQL advisory lock 防止并发部署重复执行。
 - `db/schema.sql` 现在仅作为 bootstrap/reference 文档；生产数据库由 migration history 管理。
+
+## 后端最新进度
+
+`id-photo-back` 已新增 `agent/queue-worker-bridge` 分支，并创建 Draft PR #2，已经按照当前 Frontend Bridge Contract 实现 Lightning Worker。
+
+后端目前已经实现：
+
+- `/process-queue` 接收 Vercel wake payload。
+- 正式支持前端使用的 snake_case：`worker_run_id`、`bridge_url`、`worker_credential`。
+- 同时暂时兼容 camelCase payload。
+- Worker 使用短期 Worker Credential 作为 Bearer Token 调用 Vercel Bridge。
+- 一个 Worker Run 内串行处理 Job。
+- `IDCreator` 在进程启动时初始化，不会每个 Job 重复加载模型。
+- `next → R2 input GET → GPU inference → R2 output PUT → complete/fail`。
+- 推理期间每 60 秒 heartbeat。
+- Queue 空后调用 `finish`。
+- 单 Job 失败后回调 `fail` 并继续处理后续 Job。
+- 保留 `/generate` 同步 API 作为单张图片手动/回归测试接口。
+- Lightning 后端不依赖项目级 `LIGHTNING_*`、Database、R2、Queue 环境变量。
 
 ## 当前重要实现约定
 
@@ -92,14 +110,16 @@ next build
 ## 下一步
 
 1. 确认最新 Preview Build 成功，并检查 migration 日志出现 `001_initial applied`（首次部署）或 `001_initial already applied`。
-2. 根据 Bridge contract 修改 Lightning Worker：收到短期 credential 后调用 `/next`，串行处理，期间 heartbeat，完成后 `/complete` / `/fail`，empty 后 `/finish`。
-3. 测试 3 个 Job：提交 → queued → 开始 → Lightning 唤醒 → 依次 claim → R2 输入/输出 → completed。
+2. 配置/确认 Lightning 的公网 wake endpoint 能把 Vercel wake body 原样交给 `/process-queue`。
+3. 真实测试 3 个 Job：提交 → queued → 开始 → Lightning 唤醒 → 依次 claim → R2 输入/输出 → completed。
 4. 测试重复点击开始、Worker 崩溃、lease 到期、重复 complete、单 Job fail/retry。
 5. 测量实际推理时间后调整 lease、heartbeat 和 presigned URL 有效期。
-6. 端到端生产测试通过后再合并到 `main`。
+6. 验证前后端完整生产链路后，合并 `id-photo-back` Draft PR #2 和 Frontend 分支到 `main`。
 
 ## 当前未确认
 
-- 尚未确认最新 migration + Next.js Build 已经通过最终 Vercel Build。
-- 尚未完成真实 Lightning Worker 与 Bridge 的端到端联调。
+- 尚未完成真实 Lightning 公网 wake endpoint → `/process-queue` 联调。
+- 尚未完成真实 Lightning Worker 与 Vercel Bridge 的端到端联调。
 - 尚未确认 3 Job 串行处理和 Worker 崩溃恢复的生产结果。
+- 尚未根据真实 Lightning p95 / 最大推理时间校准 lease、heartbeat 和 presigned URL。
+- 后端目前是 Draft PR，尚未合并到 `main`。
