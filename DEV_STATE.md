@@ -47,54 +47,111 @@
 
 ## 联合调试最新进度
 
-2026-08-15 首次真实联调已定位到 Lightning Wake URL 路径问题：
+### 2026-08-15：Wake URL 已修复
+
+首次真实联调确认 `LIGHTNING_API_URL` 指向 `/`，导致：
 
 ```text
-Vercel POST /api/jobs/start
-  ↓
-POST LIGHTNING_API_URL
-  ↓
-Lightning 实例成功被唤醒
-  ↓
-FastAPI 收到 POST /
-  ↓
-405 Method Not Allowed
+POST / → 405 Method Not Allowed
 ```
 
-Vercel `/api/jobs/start` 因此返回 `502`，前端显示“启动 Lightning 失败 (405)”。Lightning 实例日志已确认：
+前端现已自动把 `LIGHTNING_API_URL` 规范化为：
 
 ```text
-INFO: 130.211.236.75:0 - "POST / HTTP/1.1" 405 Method Not Allowed
+POST ${LIGHTNING_API_URL}/process-queue
 ```
 
-### 已确认共识
-
-`LIGHTNING_API_URL` 当前指向 Lightning 服务根路径 `/`，而不是应用 Worker endpoint `/process-queue`。
-
-因此：
+随后 Lightning 日志已经确认：
 
 ```text
-当前：POST https://<lightning-host>/
-正确：POST https://<lightning-host>/process-queue
+POST /process-queue HTTP/1.1 200 OK
 ```
 
-后端 FastAPI 本身已经定义：
+因此 Wake 阶段已通过，Worker 已正式启动。
 
-```python
-@app.post("/process-queue")
+### 2026-08-15：当前问题为 Worker Credential 401
+
+Lightning 随后立即调用：
+
+```text
+POST <Vercel>/api/worker/next
+Authorization: Bearer <worker credential>
 ```
 
-问题发生在 Wake URL 路径，没有证据表明 Queue、Neon、R2 或 GPU 推理逻辑有问题。
+Vercel 返回 `401`，Lightning 日志：
 
-### 当前代码修复
+```text
+[QueueWorker] stopped unexpectedly run=22647145-611a-4856-be52-45abffca0f00: worker credential is invalid or expired
+[QueueWorker] stopped run=22647145-611a-4856-be52-45abffca0f00 processed=0
+```
 
-`app/api/jobs/start/route.ts` 已修改：
+这说明当前已经进入：
 
-- 在 Vercel 端对 `LIGHTNING_API_URL` 自动追加 `/process-queue`（如果尚未包含）。
-- 保持兼容已经配置为 `/process-queue` 的 URL，避免重复追加。
-- Lightning Wake 失败时读取 response body，并把 HTTP status、statusText、body 前 1000 字符写入 `photo_worker_runs.error` 和 Vercel Runtime Log，便于下一轮联合调试。
+```text
+Lightning /process-queue 200
+        ↓
+POST Vercel /api/worker/next
+        ↓
+401
+```
 
-当前 commit：`93d218f2b0a807e58bdf963d9b259e6edc97dd6f`。
+问题范围已缩小到 Worker Credential 的传递、hash、Neon 查询或 `/api/worker/next` 部署版本，不涉及 GPU 推理。
+
+### Credential 当前设计
+
+Vercel：
+
+```text
+createWorkerCredential()
+ ↓
+SHA-256
+ ↓
+Neon photo_worker_runs.credential_hash
+```
+
+同时将原始 credential 放进 Lightning wake body。
+
+Lightning：
+
+```text
+Authorization: Bearer <credential>
+```
+
+Vercel Bridge：
+
+```text
+Bearer token
+ ↓
+SHA-256
+ ↓
+credential_hash + expiry + status 校验
+```
+
+理论上生成和验证使用同一 SHA-256 实现，因此目前需要通过日志确认实际收到的 token 与 Neon 中的 credential hash 是否匹配。
+
+### 本轮调试代码
+
+前端 `lib/worker-auth.ts` 已加入**不泄露 secret 的诊断日志**：
+
+- Authorization 是否存在
+- token 长度
+- Neon 中 Worker Run 总数
+- `matchingHash`
+- `matchingButExpired`
+- `matchingButInactive`
+
+不会记录原始 credential 或 hash。
+
+后端 `id-photo-back/api_server.py` 已加入：
+
+- Worker Run 启动时记录 bridge URL、run ID、credential 长度
+- `/next` 收到 401 时记录 response body 前 1000 字符
+- 不记录 credential 内容
+
+当前相关提交：
+
+- Frontend auth diagnostics：`0337fb026aa7208ebd1cd6c2ccfab9d0b5d6778d`
+- Backend diagnostics：`15f86cd49768f8d109b8614fff06c3022a74ca41`
 
 ## 当前重要实现约定
 
@@ -148,41 +205,14 @@ Neon Job lease 是任务所有权的 source of truth。Worker 崩溃后，lease 
 
 新的数据库结构必须新增编号 migration，例如 `db/migrations/002_add_xxx.sql`，不要直接修改生产数据库或依赖手动执行 `db/schema.sql`。
 
-Vercel 部署时：
-
-```text
-Git push
- ↓
-Vercel build
- ↓
-npm run db:migrate
- ↓
-schema_migrations 检查版本
- ↓
-只执行尚未应用的 migration
- ↓
-next build
- ↓
-部署
-```
-
-如果 migration 失败，Build 失败，避免部署一个代码与数据库结构不匹配的版本。
-
 ## 下一步
 
-1. 部署当前 `93d218f2b0a807e58bdf963d9b259e6edc97dd6f` 到 Vercel Preview/Production。
-2. 重新点击“开始处理”，确认 Lightning 日志从 `POST / 405` 变为 `POST /process-queue`。
-3. 确认 FastAPI `/process-queue` 返回 `200`，并开始调用 Vercel Bridge `/api/worker/next`。
-4. 联调 1 个 Job：claim → R2 input GET → GPU inference → R2 output PUT → complete。
-5. 联调成功后再测试 3 Job 串行处理。
-6. 测试 heartbeat、Worker 崩溃、lease 到期、重复 complete、单 Job fail/retry。
-7. 测量实际推理时间后调整 lease、heartbeat 和 presigned URL 有效期。
-8. 验证前后端完整生产链路后，合并 `id-photo-back` Draft PR #2 和 Frontend 分支到 `main`。
-
-## 当前未确认
-
-- `/process-queue` 尚未完成真实成功调用验证。
-- 尚未完成真实 Lightning Worker 与 Vercel Bridge 的端到端联调。
-- 尚未确认 3 Job 串行处理和 Worker 崩溃恢复的生产结果。
-- 尚未根据真实 Lightning p95 / 最大推理时间校准 lease、heartbeat 和 presigned URL。
-- 后端目前是 Draft PR，尚未合并到 `main`。
+1. 部署 Frontend `0337fb026aa7208ebd220?` 对应的最新分支版本以及 Backend `15f86cd49768f8d109b8614fff06c3022a74ca41`。
+2. 再点击一次“开始处理”。
+3. 首先看 Vercel Runtime Logs 中 `[WorkerAuth] credential rejected` 的四个诊断字段：`tokenLength / matchingHash / matchingButExpired / matchingButInactive`。
+4. 同时看 Lightning：`/next unauthorized ... body=...`。
+5. 如果 `matchingHash=0`：重点检查 Wake body 中 credential 是否原样传递，以及 Vercel start 与 worker/next 是否连接同一个 Neon 数据库/同一部署。
+6. 如果 `matchingHash=1` 且 `matchingButExpired=1`：检查服务器时间、credential TTL 和数据库时间。
+7. 如果 `matchingHash=1` 且 `matchingButInactive=1`：检查 Worker Run 是否在 `/next` 到达前被 start/cleanup 逻辑置为 failed/completed。
+8. 如果认证通过，继续调试 `next → R2 → inference → complete`。
+9. 认证链路稳定后，再补正式 `worker_events` 事件日志；当前诊断日志先用于快速定位 401。
