@@ -84,6 +84,8 @@ export async function putObject(key: string, body: ArrayBuffer | Uint8Array, con
   const service = "s3";
   const bytes = body instanceof ArrayBuffer ? new Uint8Array(body) : body;
   const payloadHash = await sha256Bytes(bytes);
+  const bodyBuffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(bodyBuffer).set(bytes);
   const now = new Date();
   const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
   const dateStamp = amzDate.slice(0, 8);
@@ -105,7 +107,7 @@ export async function putObject(key: string, body: ArrayBuffer | Uint8Array, con
       "x-amz-date": amzDate,
       Authorization: `AWS4-HMAC-SHA256 Credential=${credential}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
     },
-    body: bytes,
+    body: bodyBuffer,
     cache: "no-store",
   });
   if (!response.ok) throw new Error(`R2 upload failed: ${response.status}`);
