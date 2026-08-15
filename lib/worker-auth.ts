@@ -11,8 +11,7 @@ async function hash(value: string) {
 export function createWorkerCredential() {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
-  const token = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
-  return token;
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 export async function hashWorkerCredential(token: string) {
@@ -27,12 +26,12 @@ export async function authenticateWorker(request: Request) {
 
   const credentialHash = await hash(token);
   const rows = await sql`
-    SELECT id, status, credential_expires_at
-    FROM photo_worker_runs
+    UPDATE photo_worker_runs
+    SET last_seen_at = NOW()
     WHERE credential_hash = ${credentialHash}
       AND credential_expires_at > NOW()
       AND status IN ('starting', 'running')
-    LIMIT 1
+    RETURNING id, status, credential_expires_at
   `;
   return rows[0] || null;
 }
