@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS photo_jobs (
   status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','processing','completed','failed')),
   error TEXT,
   processing_time_ms INTEGER,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  worker_run_id TEXT,
+  claimed_at TIMESTAMPTZ,
+  lease_expires_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   started_at TIMESTAMPTZ,
   completed_at TIMESTAMPTZ
@@ -29,10 +33,26 @@ CREATE TABLE IF NOT EXISTS photo_jobs (
 
 CREATE INDEX IF NOT EXISTS photo_jobs_status_created_idx ON photo_jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS photo_jobs_request_idx ON photo_jobs(request_id);
+CREATE INDEX IF NOT EXISTS photo_jobs_lease_idx ON photo_jobs(status, lease_expires_at);
+
+CREATE TABLE IF NOT EXISTS photo_worker_runs (
+  id TEXT PRIMARY KEY,
+  credential_hash TEXT NOT NULL UNIQUE,
+  credential_expires_at TIMESTAMPTZ NOT NULL,
+  status TEXT NOT NULL DEFAULT 'starting' CHECK (status IN ('starting','running','completed','failed')),
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  finished_at TIMESTAMPTZ,
+  error TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS photo_worker_runs_active_idx
+  ON photo_worker_runs(status, credential_expires_at);
 
 CREATE TABLE IF NOT EXISTS photo_worker_state (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   status TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle','starting','running')),
+  active_run_id TEXT REFERENCES photo_worker_runs(id),
   started_at TIMESTAMPTZ,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -40,3 +60,10 @@ CREATE TABLE IF NOT EXISTS photo_worker_state (
 INSERT INTO photo_worker_state (id, status)
 VALUES (1, 'idle')
 ON CONFLICT (id) DO NOTHING;
+
+-- Safe migrations for databases created with the previous schema.
+ALTER TABLE photo_jobs ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE photo_jobs ADD COLUMN IF NOT EXISTS worker_run_id TEXT;
+ALTER TABLE photo_jobs ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
+ALTER TABLE photo_jobs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
+ALTER TABLE photo_worker_state ADD COLUMN IF NOT EXISTS active_run_id TEXT REFERENCES photo_worker_runs(id);
