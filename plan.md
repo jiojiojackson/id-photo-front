@@ -25,7 +25,7 @@ Vercel
        └─ empty → finish
 ```
 
-核心原则：Vercel 负责任务协调，Lightning 负责 GPU 推理；模型生命周期绑定 Worker Run，而不是单个 Job。
+核心原则：Vercel 负责任务协调，Lightning 负责推理；模型生命周期绑定 Worker Run，而不是单个 Job。
 
 ## 2. 环境变量
 
@@ -93,6 +93,8 @@ Lightning 应用本身不读取项目级 `LIGHTNING_*`、Database、R2、Queue �
   "worker_credential_expires_at": "..."
 }
 ```
+
+如果已有 Worker Run 超过 120 秒没有 `last_seen_at` 更新，则开始新的 Worker Run 前会先把该旧 Run 以及它仍处于 `processing` 的 Job 标记为 `failed`，再恢复 Worker State 为 `idle`。
 
 ## 5. 动态 Vercel Preview Hostname
 
@@ -175,9 +177,42 @@ lease = 10 分钟
 heartbeat = 60 秒
 presigned URL = 15 分钟
 MAX_ATTEMPTS = 5
+Worker stale = 120 秒
 ```
 
 正式生产前根据真实推理时间重新校准。
+
+### Worker Run liveness
+
+`photo_worker_runs.last_seen_at` 会在以下 Bridge 请求中刷新：
+
+```text
+next
+heartbeat
+complete
+fail
+finish
+```
+
+因此 heartbeat 是长时间 inference 的 liveness 信号。后端进程崩溃时 heartbeat 停止，`last_seen_at` 最终过期。
+
+### Worker 失联后的真实状态
+
+状态 API 在返回数据前执行一次轻量 reconcile：
+
+```text
+active Worker Run
+      ↓
+credential expired OR last_seen_at > 120s 未更新
+      ↓
+processing Jobs → failed
+Worker Run → failed
+Worker State → idle
+```
+
+本调试阶段的设计是：**Worker 整体崩溃/失联直接显示失败，不自动把这些 Job 重新排队。** 这样前端不会永远停留在“处理中”。
+
+单个 Job 主动调用 `/api/worker/fail` 时仍保留原来的 `MAX_ATTEMPTS=5` 重试策略。
 
 ## 7. Queue ACK
 
@@ -195,7 +230,7 @@ Lightning inference
 complete / fail
 ```
 
-Worker 崩溃后 lease 到期，下一次 Worker Run 可重新 claim。
+如果 Worker 在运行中崩溃，status reconcile 会把当前 processing Job 标记 failed，而不是让前端永久等待。
 
 ## 8. Lightning Worker
 
@@ -204,14 +239,15 @@ Worker 崩溃后 lease 到期，下一次 Worker Run 可重新 claim。
 1. 复用已初始化的 `IDCreator`。
 2. `next` 获取 Job。
 3. 下载 R2 input。
-4. GPU inference。
+4. CPU inference。
 5. 上传 R2 output。
 6. complete。
 7. heartbeat 每 60 秒。
 8. 失败调用 fail 后继续下一个 Job。
 9. empty 后 finish。
+10. Worker Run 结束时释放模型缓存和 per-job 临时内存。
 
-GPU inference 串行，不为每个 Job 重载模型。
+当前 CPU 调试模式已经验证连续多个 Job 可以复用 BiRefNet/RetinaFace ONNX session；Job 1→Job 2 的 RSS 扩容后稳定，Worker Run 结束后回落到约 300 MB 级别。
 
 ## 9. 前端状态请求策略
 
@@ -227,9 +263,47 @@ GET /api/jobs/status
 
 - 页面打开：不请求。
 - 提交任务成功：刷新一次。
-- 开始处理成功/失败：刷新一次。
+- 开始处理成功：刷新一次。
 - 用户点击“刷新任务状态”：请求一次。
-- Lightning 推理期间：默认不请求。
+- 开始处理后额外安排一次约 130 秒后的**单次**状态检查，专门用于检测 Worker 崩溃/失联。
+
+不会恢复 2.5 秒循环请求。
+
+### 后端崩溃时的 UI
+
+正常：
+
+```text
+processing
+   ↓
+complete
+   ↓
+completed
+```
+
+后端崩溃：
+
+```text
+processing
+   ↓
+heartbeat 停止
+   ↓
+120 秒 stale
+   ↓
+下一次 status request
+   ↓
+failed
+   ↓
+前端显示：✕ 失败
+```
+
+失败 Job 的 `error` 同时显示，例如：
+
+```text
+Worker Run 已失联超过 120 秒，后端可能已停止。
+```
+
+前端任务统计现在也显示 `failed` 数量。
 
 ### 关于旧 Preview / 历史部署
 
@@ -308,7 +382,19 @@ npm run db:reset
 
 ## 12. Migration
 
-生产数据库结构由：
+本次失败状态传播只使用已有的：
+
+```text
+photo_jobs.status
+photo_jobs.worker_run_id
+photo_worker_runs.status
+photo_worker_runs.last_seen_at
+photo_worker_state
+```
+
+因此**不需要新的数据库 migration**。
+
+生产数据库结构继续由：
 
 ```text
 db/migrations/*.sql
@@ -324,8 +410,6 @@ npm run db:migrate
 next build
 ```
 
-新的 schema 必须新增 migration，不能把 reset 操作加入 migration。
-
 ## 13. 当前开发状态
 
 ### 已完成
@@ -338,13 +422,16 @@ next build
 - Worker Credential。
 - Job claim + lease。
 - heartbeat / complete / fail / finish。
-- Worker 崩溃恢复。
+- Worker `last_seen_at` liveness。
+- Worker 崩溃/失联 → processing Job failed。
+- 状态 API stale reconcile。
+- 前端单次 stale failure check，不恢复高频轮询。
 - Migration 自动化。
 - Lightning Studio 直接 FastAPI Debug 模式。
 - `/process-queue` 自动追加路径。
 - Preview hostname 动态传递到 Lightning。
 - Lightning 后端使用 wake payload 的 `vercel_origin` 构造 Bridge 主机地址。
-- 前端取消 `/api/jobs/status` 自动轮询，改为手动刷新。
+- 前端取消 `/api/jobs/status` 自动轮询，改为手动刷新 + 必要的一次性失联检查。
 - 添加 CLI `npm run db:reset`。
 - 添加前端“清除当前历史记录”与 `POST /api/jobs/reset`。
 - 修复 `/api/worker/api/worker/*` 重复 URL 拼接。
@@ -368,6 +455,7 @@ POST https://<当前-preview-host>/api/worker/next
 8. 确认不再被 Deployment Protection 或 cookie middleware 返回 401。
 9. 确认 `lib/worker-auth.ts` 成功认证并返回 200。
 10. 确认 Job claim 后继续 R2 → inference → complete → finish。
-11. 完成 1 Job 后测试 3 Job 串行。
-12. 测试 heartbeat、lease recovery、重复 complete、fail/retry。
-13. 最后切回 Lightning Platform Wake 模式。
+11. **故意停止 Lightning Studio FastAPI 进程**，等待超过 120 秒，观察前端的一次性状态检查是否显示 `✕ 失败`。
+12. 手动点击“刷新任务状态”，确认仍为 failed，且 Worker 状态为 idle。
+13. 再测试正常 3 Job 串行、heartbeat、lease recovery、重复 complete、fail/retry。
+14. 最后切回 Lightning Platform Wake 模式。
