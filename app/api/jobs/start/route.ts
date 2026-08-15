@@ -75,7 +75,7 @@ export async function POST(request: NextRequest) {
     // Lightning is stateless. It receives everything it needs for this run;
     // the application itself does not need LIGHTNING_* environment variables.
     const bridgeUrl = new URL("/api/worker", request.url).toString();
-    const wakeResponse = await fetch(lightningUrl, {
+    const wakeResponse = await fetch(buildLightningProcessQueueUrl(lightningUrl), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -92,8 +92,16 @@ export async function POST(request: NextRequest) {
     });
 
     if (!wakeResponse.ok) {
+      const responseBody = await wakeResponse.text().catch(() => "");
+      const errorMessage = [
+        `Lightning wake failed: HTTP ${wakeResponse.status}`,
+        wakeResponse.statusText ? `(${wakeResponse.statusText})` : "",
+        responseBody ? `body=${responseBody.slice(0, 1000)}` : "",
+      ].filter(Boolean).join(" ");
+
+      console.error("[WorkerStart]", errorMessage);
       await sql.begin(async (tx) => {
-        await tx`UPDATE photo_worker_runs SET status = 'failed', finished_at = NOW(), error = ${`Lightning wake failed: ${wakeResponse.status}`} WHERE id = ${workerRunId}`;
+        await tx`UPDATE photo_worker_runs SET status = 'failed', finished_at = NOW(), error = ${errorMessage} WHERE id = ${workerRunId}`;
         await tx`UPDATE photo_worker_state SET status = 'idle', active_run_id = NULL, updated_at = NOW() WHERE id = 1 AND active_run_id = ${workerRunId}`;
       });
       return NextResponse.json({ error: `启动 Lightning 失败 (${wakeResponse.status})` }, { status: 502 });
@@ -119,6 +127,14 @@ export async function POST(request: NextRequest) {
     }
     return NextResponse.json({ error: error instanceof Error ? error.message : "启动处理失败" }, { status: 500 });
   }
+}
+
+function buildLightningProcessQueueUrl(baseUrl: string): string {
+  const url = new URL(baseUrl);
+  if (!url.pathname.endsWith("/process-queue")) {
+    url.pathname = `${url.pathname.replace(/\/$/, "")}/process-queue`;
+  }
+  return url.toString();
 }
 
 async function estimateSeconds(jobCount: number) {
