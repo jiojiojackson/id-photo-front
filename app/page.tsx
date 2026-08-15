@@ -11,7 +11,6 @@ const PRESETS = [
 const MAX_IMAGE_DIMENSION = 2000;
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
 const FALLBACK_SECONDS_PER_JOB = 45;
-const WORKER_STALE_CHECK_MS = 130_000;
 
 type Size = { width: number; height: number };
 type Job = { id: string; width: number; height: number; unit?: string; status: string; resultUrl: string | null; error?: string | null };
@@ -47,7 +46,6 @@ function normalize(value: string, fallback: number) {
 
 export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const failureCheckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState("");
@@ -71,10 +69,11 @@ export default function Home() {
   const [loggingOut, setLoggingOut] = useState(false);
 
   useEffect(() => () => {
-    if (failureCheckTimerRef.current) clearTimeout(failureCheckTimerRef.current);
     if (preview) URL.revokeObjectURL(preview);
   }, [preview]);
 
+  // This is intentionally manual-only. /api/jobs/status may reconcile stale
+  // Worker Runs in PostgreSQL, but it must never wake Lightning.
   async function refreshStatus() {
     setRefreshing(true);
     try {
@@ -90,20 +89,11 @@ export default function Home() {
     finally { setRefreshing(false); }
   }
 
-  function scheduleWorkerFailureCheck() {
-    if (failureCheckTimerRef.current) clearTimeout(failureCheckTimerRef.current);
-    failureCheckTimerRef.current = setTimeout(async () => {
-      await refreshStatus();
-      failureCheckTimerRef.current = null;
-    }, WORKER_STALE_CHECK_MS);
-  }
-
   async function resetHistory() {
     if (resetting) return;
     const confirmed = window.confirm("确定清除当前所有任务和历史记录吗？\n\n这会删除当前 Job、请求记录和 Worker Run，无法恢复。\n如果 Lightning 正在处理任务，请先确认它已经停止。\n\n清除后会回到初始状态。" );
     if (!confirmed) return;
     setResetting(true); setError("");
-    if (failureCheckTimerRef.current) clearTimeout(failureCheckTimerRef.current);
     try {
       const response = await fetch("/api/jobs/reset", { method: "POST" });
       const data = await response.json().catch(() => null);
@@ -142,11 +132,12 @@ export default function Home() {
     if (!queued || workerStatus !== "idle") return;
     setStarting(true); setError("");
     try {
+      // Only this explicit Start action is allowed to reach /api/jobs/start,
+      // whose server-side implementation is responsible for waking Lightning.
       const response = await fetch("/api/jobs/start", { method: "POST" });
       const data = await response.json().catch(() => null);
       if (!response.ok) throw new Error(data?.error || `启动失败 (${response.status})`);
       await refreshStatus();
-      scheduleWorkerFailureCheck();
     } catch (err) {
       await refreshStatus();
       setError(err instanceof Error ? err.message : "启动处理失败");
@@ -210,7 +201,7 @@ export default function Home() {
         <button onClick={resetHistory} disabled={resetting || starting} style={{ width: "100%", marginTop: 10, padding: "10px 14px", border: "1px solid #fecaca", borderRadius: 8, background: "#fff1f2", color: "#b91c1c", fontWeight: 600, cursor: resetting ? "wait" : "pointer" }}>
           {resetting ? "正在清除历史记录…" : "清除当前历史记录"}
         </button>
-        <div className="hint" style={{ textAlign: "center", marginTop: 10 }}>{queued ? `根据历史处理速度，预计 ${estimate}。点击开始后才生成临时 R2 URL 并唤醒 Lightning。` : "可以先提交任务，等任务攒好后再开始处理。任务状态不会自动轮询；处理过程中只在必要时检查一次 Worker 是否失联，也可以按需点击“刷新任务状态”。"}</div>
+        <div className="hint" style={{ textAlign: "center", marginTop: 10 }}>{queued ? `根据历史处理速度，预计 ${estimate}。点击开始后才生成临时 R2 URL 并唤醒 Lightning。` : "任务状态不会自动轮询。点击“刷新任务状态”时才会查询状态；如果 Lightning 已停止，刷新后会将失联的 Worker Run 标记为失败。"}</div>
         {error && <div className="error">{error}</div>}
       </section>
 
