@@ -4,6 +4,8 @@ import { createWorkerCredential, credentialExpiryDate, hashWorkerCredential } fr
 
 export const runtime = "nodejs";
 
+const WORKER_STALE_SECONDS = 120;
+
 export async function POST(request: NextRequest) {
   let workerRunId: string | null = null;
 
@@ -23,19 +25,21 @@ export async function POST(request: NextRequest) {
 
       if (state[0]?.status !== "idle" && state[0]?.active_run_id) {
         const active = await tx`
-          SELECT status, credential_expires_at
+          SELECT status, credential_expires_at, last_seen_at
           FROM photo_worker_runs
           WHERE id = ${String(state[0].active_run_id)}
           FOR UPDATE
         `;
-        const expired = !active[0]
+        const lastSeen = active[0]?.last_seen_at ? new Date(active[0].last_seen_at).getTime() : 0;
+        const stale = !active[0]
           || ["completed", "failed"].includes(String(active[0].status))
-          || new Date(active[0].credential_expires_at).getTime() <= Date.now();
-        if (!expired) return { started: false, reason: "already_running" as const, count: 0 };
+          || new Date(active[0].credential_expires_at).getTime() <= Date.now()
+          || lastSeen < Date.now() - WORKER_STALE_SECONDS * 1000;
+        if (!stale) return { started: false, reason: "already_running" as const, count: 0 };
 
         await tx`
           UPDATE photo_worker_runs
-          SET status = 'failed', finished_at = NOW(), error = 'worker credential expired or run became stale'
+          SET status = 'failed', finished_at = NOW(), error = 'worker became stale or credential expired'
           WHERE id = ${String(state[0].active_run_id)} AND status IN ('starting','running')
         `;
         await tx`UPDATE photo_worker_state SET status = 'idle', active_run_id = NULL, updated_at = NOW() WHERE id = 1`;
@@ -96,7 +100,7 @@ export async function POST(request: NextRequest) {
     }
 
     await sql.begin(async (tx) => {
-      await tx`UPDATE photo_worker_runs SET status = 'running' WHERE id = ${workerRunId} AND status = 'starting'`;
+      await tx`UPDATE photo_worker_runs SET status = 'running', last_seen_at = NOW() WHERE id = ${workerRunId} AND status = 'starting'`;
       await tx`UPDATE photo_worker_state SET status = 'running', updated_at = NOW() WHERE id = 1 AND active_run_id = ${workerRunId}`;
     });
 
