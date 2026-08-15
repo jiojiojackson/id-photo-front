@@ -1,8 +1,4 @@
--- Canonical bootstrap/reference schema.
---
--- Vercel deployments do NOT execute this file directly. Production schema changes
--- are applied by the numbered files in db/migrations/ via `npm run db:migrate`.
--- Keep this file synchronized with the migration history for human reference.
+-- Initial schema. Kept idempotent so it can safely bootstrap an existing database.
 
 CREATE TABLE IF NOT EXISTS photo_requests (
   id TEXT PRIMARY KEY,
@@ -66,6 +62,7 @@ INSERT INTO photo_worker_state (id, status)
 VALUES (1, 'idle')
 ON CONFLICT (id) DO NOTHING;
 
+-- Safe upgrades for databases created from an older schema.
 ALTER TABLE photo_jobs ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE photo_jobs ADD COLUMN IF NOT EXISTS worker_run_id TEXT;
 ALTER TABLE photo_jobs ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;

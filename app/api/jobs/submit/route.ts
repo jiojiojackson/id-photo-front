@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
-import { createPresignedUrl, inputKey, outputKey } from "@/lib/r2";
+import { inputKey, outputKey, putObject } from "@/lib/r2";
 import { enqueueJob } from "@/lib/queue";
 
 export const runtime = "nodejs";
@@ -32,17 +32,13 @@ export async function POST(request: NextRequest) {
 
     const requestId = crypto.randomUUID();
     const originalKey = inputKey(requestId);
-    const uploadUrl = await createPresignedUrl("PUT", originalKey, 10 * 60);
-    const uploadResponse = await fetch(uploadUrl, {
-      method: "PUT",
-      headers: { "Content-Type": "image/jpeg" },
-      body: await image.arrayBuffer(),
-      cache: "no-store",
-    });
-    if (!uploadResponse.ok) throw new Error(`R2 upload failed: ${uploadResponse.status}`);
+
+    // Upload directly with SigV4. Processing presigned URLs are generated only
+    // after the user clicks Start, so they cannot expire while waiting in queue.
+    await putObject(originalKey, await image.arrayBuffer(), image.type || "image/jpeg");
 
     await sql`INSERT INTO photo_requests (id) VALUES (${requestId})`;
-    const jobs = [] as string[];
+    const jobs: string[] = [];
     for (const size of sizes) {
       const jobId = crypto.randomUUID();
       jobs.push(jobId);

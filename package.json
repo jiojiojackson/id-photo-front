@@ -5,6 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "vercel-build": "npm run db:migrate && next build",
+    "db:migrate": "node scripts/migrate.mjs",
     "start": "next start"
   },
   "dependencies": {
