@@ -37,12 +37,21 @@ export async function POST(request: NextRequest) {
           || lastSeen < Date.now() - WORKER_STALE_SECONDS * 1000;
         if (!stale) return { started: false, reason: "already_running" as const, count: 0 };
 
+        const staleRunId = String(state[0].active_run_id);
+        const staleError = `Worker Run 已失联超过 ${WORKER_STALE_SECONDS} 秒，后端可能已停止。`;
+        await tx`
+          UPDATE photo_jobs
+          SET status = 'failed', error = ${staleError}, completed_at = NOW(),
+              worker_run_id = NULL, claimed_at = NULL, lease_expires_at = NULL,
+              input_url = NULL, output_url = NULL, url_expires_at = NULL
+          WHERE worker_run_id = ${staleRunId} AND status = 'processing'
+        `;
         await tx`
           UPDATE photo_worker_runs
-          SET status = 'failed', finished_at = NOW(), error = 'worker became stale or credential expired'
-          WHERE id = ${String(state[0].active_run_id)} AND status IN ('starting','running')
+          SET status = 'failed', finished_at = NOW(), error = ${staleError}
+          WHERE id = ${staleRunId} AND status IN ('starting','running')
         `;
-        await tx`UPDATE photo_worker_state SET status = 'idle', active_run_id = NULL, updated_at = NOW() WHERE id = 1`;
+        await tx`UPDATE photo_worker_state SET status = 'idle', active_run_id = NULL, updated_at = NOW() WHERE id = 1 AND active_run_id = ${staleRunId}`;
       } else if (state[0]?.status !== "idle") {
         await tx`UPDATE photo_worker_state SET status = 'idle', active_run_id = NULL, updated_at = NOW() WHERE id = 1`;
       }
@@ -50,7 +59,7 @@ export async function POST(request: NextRequest) {
       const pending = await tx`
         SELECT COUNT(*)::int AS count
         FROM photo_jobs
-        WHERE status = 'queued' OR (status = 'processing' AND lease_expires_at <= NOW())
+        WHERE status = 'queued'
       `;
       const count = Number(pending[0]?.count || 0);
       if (!count) return { started: false, reason: "empty" as const, count: 0 };
@@ -72,19 +81,18 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ status: claimed.reason, queued: claimed.count }, { status: 200 });
     }
 
-    // Lightning is stateless. It receives everything it needs for this run;
-    // the application itself does not need LIGHTNING_* environment variables.
-    const bridgeUrl = new URL("/api/worker", request.url).toString();
-    const wakeResponse = await fetch(lightningUrl, {
+    const vercelOrigin = request.nextUrl.origin;
+    const bridgeUrl = `${vercelOrigin}/api/worker`;
+    const wakeResponse = await fetch(buildLightningProcessQueueUrl(lightningUrl), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        // Platform-issued credential used only by Vercel to wake Lightning.
         Authorization: `Bearer ${lightningKey}`,
       },
       body: JSON.stringify({
         worker_run_id: workerRunId,
         bridge_url: bridgeUrl,
+        vercel_origin: vercelOrigin,
         worker_credential: credential,
         worker_credential_expires_at: expiresAt.toISOString(),
       }),
@@ -92,8 +100,15 @@ export async function POST(request: NextRequest) {
     });
 
     if (!wakeResponse.ok) {
+      const responseBody = await wakeResponse.text().catch(() => "");
+      const errorMessage = [
+        `Lightning wake failed: HTTP ${wakeResponse.status}`,
+        wakeResponse.statusText ? `(${wakeResponse.statusText})` : "",
+        responseBody ? `body=${responseBody.slice(0, 1000)}` : "",
+      ].filter(Boolean).join(" ");
+      console.error("[WorkerStart]", errorMessage);
       await sql.begin(async (tx) => {
-        await tx`UPDATE photo_worker_runs SET status = 'failed', finished_at = NOW(), error = ${`Lightning wake failed: ${wakeResponse.status}`} WHERE id = ${workerRunId}`;
+        await tx`UPDATE photo_worker_runs SET status = 'failed', finished_at = NOW(), error = ${errorMessage} WHERE id = ${workerRunId}`;
         await tx`UPDATE photo_worker_state SET status = 'idle', active_run_id = NULL, updated_at = NOW() WHERE id = 1 AND active_run_id = ${workerRunId}`;
       });
       return NextResponse.json({ error: `启动 Lightning 失败 (${wakeResponse.status})` }, { status: 502 });
@@ -119,6 +134,14 @@ export async function POST(request: NextRequest) {
     }
     return NextResponse.json({ error: error instanceof Error ? error.message : "启动处理失败" }, { status: 500 });
   }
+}
+
+function buildLightningProcessQueueUrl(baseUrl: string): string {
+  const url = new URL(baseUrl);
+  if (!url.pathname.endsWith("/process-queue")) {
+    url.pathname = `${url.pathname.replace(/\/$/, "")}/process-queue`;
+  }
+  return url.toString();
 }
 
 async function estimateSeconds(jobCount: number) {
