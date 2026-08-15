@@ -11,9 +11,15 @@ export async function POST(request: NextRequest) {
 
   try {
     const lightningUrl = process.env.LIGHTNING_API_URL;
+    const debugDirectBackend = process.env.DEBUG_DIRECT_BACKEND === "true";
     const lightningKey = process.env.LIGHTNING_API_KEY;
-    if (!lightningUrl || !lightningKey) {
-      return NextResponse.json({ error: "LIGHTNING_API_URL 或 LIGHTNING_API_KEY 未配置" }, { status: 500 });
+    if (!lightningUrl) {
+      return NextResponse.json({ error: "LIGHTNING_API_URL 未配置" }, { status: 500 });
+    }
+    // Debug mode is intended for the Linux/Lightning Studio FastAPI instance.
+    // That server is directly exposed and does not use the Lightning platform API key.
+    if (!debugDirectBackend && !lightningKey) {
+      return NextResponse.json({ error: "LIGHTNING_API_KEY 未配置" }, { status: 500 });
     }
 
     const credential = createWorkerCredential();
@@ -72,16 +78,20 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ status: claimed.reason, queued: claimed.count }, { status: 200 });
     }
 
-    // Lightning is stateless. It receives everything it needs for this run;
-    // the application itself does not need LIGHTNING_* environment variables.
+    // In production, Lightning_API_KEY authenticates the platform wake request.
+    // In debug mode, the URL points directly to the FastAPI server in Lightning Studio,
+    // so no platform Authorization header is sent.
     const bridgeUrl = new URL("/api/worker", request.url).toString();
+    const wakeHeaders: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (!debugDirectBackend) {
+      wakeHeaders.Authorization = `Bearer ${lightningKey}`;
+    }
+
     const wakeResponse = await fetch(buildLightningProcessQueueUrl(lightningUrl), {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        // Platform-issued credential used only by Vercel to wake Lightning.
-        Authorization: `Bearer ${lightningKey}`,
-      },
+      headers: wakeHeaders,
       body: JSON.stringify({
         worker_run_id: workerRunId,
         bridge_url: bridgeUrl,
@@ -118,6 +128,7 @@ export async function POST(request: NextRequest) {
       jobs: claimed.count,
       credentialExpiresAt: expiresAt.toISOString(),
       estimatedSeconds: await estimateSeconds(claimed.count),
+      debugDirectBackend,
     });
   } catch (error) {
     console.error(error);
