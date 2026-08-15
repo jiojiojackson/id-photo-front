@@ -41,13 +41,14 @@ CREATE TABLE IF NOT EXISTS photo_worker_runs (
   credential_expires_at TIMESTAMPTZ NOT NULL,
   status TEXT NOT NULL DEFAULT 'starting' CHECK (status IN ('starting','running','completed','failed')),
   started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   finished_at TIMESTAMPTZ,
   error TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS photo_worker_runs_active_idx
-  ON photo_worker_runs(status, credential_expires_at);
+  ON photo_worker_runs(status, credential_expires_at, last_seen_at);
 
 CREATE TABLE IF NOT EXISTS photo_worker_state (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -66,4 +67,5 @@ ALTER TABLE photo_jobs ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL D
 ALTER TABLE photo_jobs ADD COLUMN IF NOT EXISTS worker_run_id TEXT;
 ALTER TABLE photo_jobs ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
 ALTER TABLE photo_jobs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
+ALTER TABLE photo_worker_runs ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE photo_worker_state ADD COLUMN IF NOT EXISTS active_run_id TEXT REFERENCES photo_worker_runs(id);
