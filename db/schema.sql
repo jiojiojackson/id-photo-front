@@ -1,4 +1,8 @@
--- Run once in the connected Neon database.
+-- Canonical bootstrap/reference schema.
+--
+-- Vercel deployments do NOT execute this file directly. Production schema changes
+-- are applied by the numbered files in db/migrations/ via `npm run db:migrate`.
+-- Keep this file synchronized with the migration history for human reference.
 
 CREATE TABLE IF NOT EXISTS photo_requests (
   id TEXT PRIMARY KEY,
@@ -62,7 +66,6 @@ INSERT INTO photo_worker_state (id, status)
 VALUES (1, 'idle')
 ON CONFLICT (id) DO NOTHING;
 
--- Safe migrations for databases created with the previous schema.
 ALTER TABLE photo_jobs ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE photo_jobs ADD COLUMN IF NOT EXISTS worker_run_id TEXT;
 ALTER TABLE photo_jobs ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
