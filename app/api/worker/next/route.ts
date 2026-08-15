@@ -11,6 +11,14 @@ export const runtime = "nodejs";
 const LEASE_SECONDS = 10 * 60;
 const MAX_ATTEMPTS = 5;
 
+async function touchWorkerRun(workerRunId: string) {
+  await sql`
+    UPDATE photo_worker_runs
+    SET last_seen_at = NOW()
+    WHERE id = ${workerRunId} AND status IN ('starting', 'running')
+  `;
+}
+
 async function claim(jobId: string, workerRunId: string) {
   const rows = await sql.begin(async (tx) => tx`
     WITH candidate AS (
@@ -72,6 +80,8 @@ async function responseFor(job: any, workerRunId: string) {
     WHERE id = ${job.id} AND status = 'processing' AND worker_run_id = ${workerRunId}
   `;
 
+  await touchWorkerRun(workerRunId);
+
   return NextResponse.json({
     status: "job",
     workerRunId,
@@ -98,6 +108,8 @@ export async function POST(request: Request) {
 
   try {
     const workerRunId = String(worker.id);
+    await touchWorkerRun(workerRunId);
+
     const direct = await claimNext(workerRunId);
     if (direct) return responseFor(direct, workerRunId);
 
