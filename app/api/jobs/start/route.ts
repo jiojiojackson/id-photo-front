@@ -11,13 +11,9 @@ export async function POST(request: NextRequest) {
 
   try {
     const lightningUrl = process.env.LIGHTNING_API_URL;
-    const debugDirectBackend = process.env.DEBUG_DIRECT_BACKEND === "true";
     const lightningKey = process.env.LIGHTNING_API_KEY;
-    if (!lightningUrl) {
-      return NextResponse.json({ error: "LIGHTNING_API_URL 未配置" }, { status: 500 });
-    }
-    if (!debugDirectBackend && !lightningKey) {
-      return NextResponse.json({ error: "LIGHTNING_API_KEY 未配置" }, { status: 500 });
+    if (!lightningUrl || !lightningKey) {
+      return NextResponse.json({ error: "LIGHTNING_API_URL 或 LIGHTNING_API_KEY 未配置" }, { status: 500 });
     }
 
     const credential = createWorkerCredential();
@@ -85,28 +81,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ status: claimed.reason, queued: claimed.count }, { status: 200 });
     }
 
-    // The request reaches the currently deployed Vercel Preview/Production hostname.
-    // Pass this origin explicitly to Lightning so the Worker never has to guess the
-    // Vercel hostname from an environment variable or a hard-coded domain.
     const vercelOrigin = request.nextUrl.origin;
     const bridgeUrl = `${vercelOrigin}/api/worker`;
-    const wakeHeaders: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    if (!debugDirectBackend) {
-      wakeHeaders.Authorization = `Bearer ${lightningKey}`;
-    }
-
-    console.log("[WorkerStart] Vercel bridge origin", {
-      origin: vercelOrigin,
-      bridgeUrl,
-      workerRunId,
-      debugDirectBackend,
-    });
-
     const wakeResponse = await fetch(buildLightningProcessQueueUrl(lightningUrl), {
       method: "POST",
-      headers: wakeHeaders,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${lightningKey}`,
+      },
       body: JSON.stringify({
         worker_run_id: workerRunId,
         bridge_url: bridgeUrl,
@@ -124,7 +106,6 @@ export async function POST(request: NextRequest) {
         wakeResponse.statusText ? `(${wakeResponse.statusText})` : "",
         responseBody ? `body=${responseBody.slice(0, 1000)}` : "",
       ].filter(Boolean).join(" ");
-
       console.error("[WorkerStart]", errorMessage);
       await sql.begin(async (tx) => {
         await tx`UPDATE photo_worker_runs SET status = 'failed', finished_at = NOW(), error = ${errorMessage} WHERE id = ${workerRunId}`;
@@ -144,7 +125,6 @@ export async function POST(request: NextRequest) {
       jobs: claimed.count,
       credentialExpiresAt: expiresAt.toISOString(),
       estimatedSeconds: await estimateSeconds(claimed.count),
-      debugDirectBackend,
     });
   } catch (error) {
     console.error(error);
