@@ -15,10 +15,15 @@ async function getExpectedToken(): Promise<string> {
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Paths that do not require authentication
+  // Paths that do not require cookie-based admin authentication.
+  // The Worker Bridge is intentionally excluded from this middleware because
+  // Lightning is a machine client and cannot provide the browser auth cookie.
+  // /api/worker/* authenticates independently with the short-lived Worker
+  // Credential in lib/worker-auth.ts.
   if (
     pathname.startsWith("/_next") ||
     pathname.startsWith("/api/auth") ||
+    pathname.startsWith("/api/worker") ||
     pathname === "/login" ||
     pathname === "/favicon.ico"
   ) {
@@ -49,9 +54,12 @@ export const config = {
   matcher: [
     /*
      * Match all request paths except for the ones starting with:
-     * - _next/static (static files)
-     * - _next/image (image optimization files)
-     * - favicon.ico (favicon file)
+     * - _next/static (Next.js static assets)
+     * - _next/image (Next.js image optimization)
+     * - favicon.ico
+     *
+     * /api/worker is still matched by the middleware but explicitly bypassed
+     * above so it can use its own Worker Credential authentication.
      */
     "/((?!_next/static|_next/image|favicon.ico).*)",
   ],
