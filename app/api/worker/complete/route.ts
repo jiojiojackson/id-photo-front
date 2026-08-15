@@ -12,18 +12,30 @@ export async function POST(request: Request) {
   const jobId = String(body.jobId || "");
   if (!jobId) return NextResponse.json({ error: "jobId is required" }, { status: 400 });
 
+  const runId = String(worker.id);
   const processingTimeMs = Number.isFinite(body.processingTimeMs) ? Number(body.processingTimeMs) : null;
-  const rows = await sql`
-    UPDATE photo_jobs
-    SET status = 'completed', completed_at = NOW(), error = NULL,
-        processing_time_ms = ${processingTimeMs},
-        input_url = NULL, output_url = NULL, url_expires_at = NULL
-    WHERE id = ${jobId}
-      AND status = 'processing'
-      AND worker_run_id = ${String(worker.id)}
-      AND lease_expires_at > NOW()
-    RETURNING id
-  `;
+  const rows = await sql.begin(async (tx) => {
+    const completed = await tx`
+      UPDATE photo_jobs
+      SET status = 'completed', completed_at = NOW(), error = NULL,
+          processing_time_ms = ${processingTimeMs},
+          input_url = NULL, output_url = NULL, url_expires_at = NULL
+      WHERE id = ${jobId}
+        AND status = 'processing'
+        AND worker_run_id = ${runId}
+        AND lease_expires_at > NOW()
+      RETURNING id
+    `;
+
+    if (completed.length) {
+      await tx`
+        UPDATE photo_worker_runs
+        SET last_seen_at = NOW()
+        WHERE id = ${runId} AND status IN ('starting', 'running')
+      `;
+    }
+    return completed;
+  });
 
   if (!rows.length) {
     const existing = await sql`SELECT status, worker_run_id FROM photo_jobs WHERE id = ${jobId}`;
