@@ -6,6 +6,8 @@ export const runtime = "nodejs";
 
 const LEASE_EXTENSION_SECONDS = 10 * 60;
 
+type LeaseRow = { lease_expires_at: Date | string };
+
 export async function POST(request: Request) {
   const worker = await authenticateWorker(request);
   if (!worker) return NextResponse.json({ error: "invalid or expired worker credential" }, { status: 401 });
@@ -16,7 +18,7 @@ export async function POST(request: Request) {
 
   const runId = String(worker.id);
   const rows = await sql.begin(async (tx) => {
-    const leaseRows = await tx`
+    const leaseRows = await tx<LeaseRow[]>`
       UPDATE photo_jobs
       SET lease_expires_at = NOW() + (${LEASE_EXTENSION_SECONDS} || ' seconds')::interval
       WHERE id = ${jobId}
@@ -26,7 +28,7 @@ export async function POST(request: Request) {
       RETURNING lease_expires_at
     `;
 
-    if (!leaseRows.length) return [];
+    if (!leaseRows.length) return [] as LeaseRow[];
 
     await tx`
       UPDATE photo_worker_runs
