@@ -2,6 +2,7 @@
 
 import { ChangeEvent, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import AppShell from "@/components/AppShell";
 
 const PRESETS = [
   { name: "标准 295×413", width: 295, height: 413 },
@@ -60,16 +61,10 @@ export default function CreatePage() {
     if (preview) URL.revokeObjectURL(preview);
     setFile(selected); setPreview(URL.createObjectURL(selected)); setError("");
   }
-
-  function onFileChange(e: ChangeEvent<HTMLInputElement>) {
-    const selected = e.target.files?.[0];
-    if (selected) handleFile(selected);
-  }
-
+  function onFileChange(e: ChangeEvent<HTMLInputElement>) { const selected = e.target.files?.[0]; if (selected) handleFile(selected); }
   function setSize(index: number, key: keyof SizeDraft, value: string) {
     setSizes(current => current.map((s, i) => i === index ? { ...s, [key]: value } : s));
   }
-
   function applyPreset(index: number, width: number, height: number) {
     setSizes(current => current.map((s, i) => i === index ? { width: String(width), height: String(height) } : s));
   }
@@ -78,7 +73,7 @@ export default function CreatePage() {
     if (!file) { setError("请先选择照片"); return; }
     const parsed = sizes.map(s => ({ width: parseDimension(s.width), height: parseDimension(s.height) }));
     if (parsed.some(s => s.width === null || s.height === null)) {
-      setError("尺寸必须是 100～3000 的整数。输入框可以留空编辑，但提交前必须填写有效数字。");
+      setError("尺寸必须是 100～3000 的整数。输入框可以删除后重新输入，提交前必须填写有效数字。");
       return;
     }
     setSubmitting(true); setError("");
@@ -92,22 +87,16 @@ export default function CreatePage() {
       const data = await response.json().catch(() => null);
       if (!response.ok) throw new Error(data?.error || `提交失败 (${response.status})`);
       router.push("/jobs");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "提交任务失败");
-    } finally { setSubmitting(false); }
+    } catch (err) { setError(err instanceof Error ? err.message : "提交任务失败"); }
+    finally { setSubmitting(false); }
   }
 
   return (
-    <AppShellPlaceholder>
+    <AppShell>
       <div className="hero">
-        <div>
-          <div className="eyebrow">STEP 01 · CREATE</div>
-          <h1>制作你的证件照</h1>
-          <p>上传一张照片，设置需要的尺寸。背景色稍后可以在结果页自由调整。</p>
-        </div>
+        <div><div className="eyebrow">STEP 01 · CREATE</div><h1>制作你的证件照</h1><p>上传照片并设置尺寸。背景色在生成完成后再自由调整。</p></div>
         <div className="hero-badge">300 DPI</div>
       </div>
-
       <section className="editor-layout">
         <div className="panel upload-panel">
           <div className="section-title"><span>01</span><div><h2>选择照片</h2><p>支持 JPG、PNG 等常见图片格式</p></div></div>
@@ -117,7 +106,6 @@ export default function CreatePage() {
           <input ref={fileInputRef} type="file" accept="image/*" hidden onChange={onFileChange} />
           {file && <div className="file-meta"><span>{file.name}</span><span>{formatBytes(file.size)}</span></div>}
         </div>
-
         <div className="panel size-panel">
           <div className="section-title"><span>02</span><div><h2>选择照片尺寸</h2><p>可以直接输入任意 100～3000 px 的整数</p></div></div>
           <div className="size-list">
@@ -135,18 +123,8 @@ export default function CreatePage() {
           </div>
         </div>
       </section>
-
-      <div className="action-bar">
-        <div><strong>准备好了吗？</strong><span>背景色将在生成完成后调整</span></div>
-        <button className="primary-action" onClick={submitJobs} disabled={!file || submitting}>{submitting ? "正在提交…" : "提交并进入任务队列 →"}</button>
-      </div>
+      <div className="action-bar"><div><strong>准备好了吗？</strong><span>背景色将在生成完成后调整</span></div><button className="primary-action" onClick={submitJobs} disabled={!file || submitting}>{submitting ? "正在提交…" : "提交并进入任务队列 →"}</button></div>
       {error && <div className="error">{error}</div>}
-    </AppShellPlaceholder>
+    </AppShell>
   );
-}
-
-function AppShellPlaceholder({ children }: { children: React.ReactNode }) {
-  // Keeps the page component client-side while sharing the shell without making the shell itself part of page state.
-  const AppShell = require("@/components/AppShell").default as React.ComponentType<{ children: React.ReactNode }>;
-  return <AppShell>{children}</AppShell>;
 }
