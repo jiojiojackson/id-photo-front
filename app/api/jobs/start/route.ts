@@ -41,12 +41,21 @@ export async function POST(request: NextRequest) {
           || lastSeen < Date.now() - WORKER_STALE_SECONDS * 1000;
         if (!stale) return { started: false, reason: "already_running" as const, count: 0 };
 
+        const staleRunId = String(state[0].active_run_id);
+        const staleError = `Worker Run 已失联超过 ${WORKER_STALE_SECONDS} 秒，后端可能已停止。`;
+        await tx`
+          UPDATE photo_jobs
+          SET status = 'failed', error = ${staleError}, completed_at = NOW(),
+              worker_run_id = NULL, claimed_at = NULL, lease_expires_at = NULL,
+              input_url = NULL, output_url = NULL, url_expires_at = NULL
+          WHERE worker_run_id = ${staleRunId} AND status = 'processing'
+        `;
         await tx`
           UPDATE photo_worker_runs
-          SET status = 'failed', finished_at = NOW(), error = 'worker became stale or credential expired'
-          WHERE id = ${String(state[0].active_run_id)} AND status IN ('starting','running')
+          SET status = 'failed', finished_at = NOW(), error = ${staleError}
+          WHERE id = ${staleRunId} AND status IN ('starting','running')
         `;
-        await tx`UPDATE photo_worker_state SET status = 'idle', active_run_id = NULL, updated_at = NOW() WHERE id = 1`;
+        await tx`UPDATE photo_worker_state SET status = 'idle', active_run_id = NULL, updated_at = NOW() WHERE id = 1 AND active_run_id = ${staleRunId}`;
       } else if (state[0]?.status !== "idle") {
         await tx`UPDATE photo_worker_state SET status = 'idle', active_run_id = NULL, updated_at = NOW() WHERE id = 1`;
       }
@@ -54,7 +63,7 @@ export async function POST(request: NextRequest) {
       const pending = await tx`
         SELECT COUNT(*)::int AS count
         FROM photo_jobs
-        WHERE status = 'queued' OR (status = 'processing' AND lease_expires_at <= NOW())
+        WHERE status = 'queued'
       `;
       const count = Number(pending[0]?.count || 0);
       if (!count) return { started: false, reason: "empty" as const, count: 0 };
