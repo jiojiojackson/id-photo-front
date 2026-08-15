@@ -146,6 +146,24 @@ POST /api/worker/finish
 
 所有 Bridge API 使用短期 Worker Credential。
 
+### Bridge 认证边界
+
+`/api/worker/*` 是机器到机器的接口，不使用浏览器登录 Cookie。Next.js `middleware.ts` 必须允许这些路径通过 middleware，然后由 `lib/worker-auth.ts` 执行：
+
+```text
+Authorization: Bearer <short-lived Worker Credential>
+        ↓
+SHA-256
+        ↓
+photo_worker_runs.credential_hash
+        ↓
+expires_at + status 检查
+```
+
+普通页面和其它 API 仍然使用 `auth_token` Cookie。
+
+**不要把 `/api/worker/*` 重新放回 cookie middleware 保护，否则 Lightning 会在进入 Route Handler 前收到 401。**
+
 `next` 使用 Neon transaction + `FOR UPDATE SKIP LOCKED` claim Job，并设置 lease。
 
 Claim 成功后才生成 R2 input/output presigned URL。
@@ -329,6 +347,9 @@ next build
 - 前端取消 `/api/jobs/status` 自动轮询，改为手动刷新。
 - 添加 CLI `npm run db:reset`。
 - 添加前端“清除当前历史记录”与 `POST /api/jobs/reset`。
+- 修复 `/api/worker/api/worker/*` 重复 URL 拼接。
+- 区分 Vercel Deployment Protection 401 与 Worker Credential 401。
+- 修复 `middleware.ts` 对 `/api/worker/*` 的 cookie 鉴权拦截。
 
 ### 下一步
 
@@ -338,13 +359,15 @@ next build
 4. 提交 1 个任务，手动刷新确认 queued。
 5. 点击开始处理。
 6. Lightning 日志确认真实 Preview `vercel_origin`。
-7. 确认 Worker 请求：
+7. 确认请求：
 
 ```text
 POST https://<当前-preview-host>/api/worker/next
 ```
 
-8. 如果不再 401，继续 R2 → inference → complete → finish。
-9. 完成 1 Job 后测试 3 Job 串行。
-10. 测试 heartbeat、lease recovery、重复 complete、fail/retry。
-11. 最后切回 Lightning Platform Wake 模式。
+8. 确认不再被 Deployment Protection 或 cookie middleware 返回 401。
+9. 确认 `lib/worker-auth.ts` 成功认证并返回 200。
+10. 确认 Job claim 后继续 R2 → inference → complete → finish。
+11. 完成 1 Job 后测试 3 Job 串行。
+12. 测试 heartbeat、lease recovery、重复 complete、fail/retry。
+13. 最后切回 Lightning Platform Wake 模式。
