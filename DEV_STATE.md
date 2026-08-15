@@ -10,6 +10,41 @@
 - 新增“清除当前历史记录”按钮和 `POST /api/jobs/reset`。
 - reset 会清空当前 Job、请求记录、Worker Run，并将 Worker State 恢复为 idle。
 - reset 不是部署操作，不会自动执行。
+- **已修复 Worker Bridge 被全局 cookie middleware 拦截的问题。** `/api/worker/*` 现在绕过浏览器 `auth_token` middleware，改由短期 Worker Credential 在 `lib/worker-auth.ts` 中独立认证。
+
+## 最近一次认证问题定位
+
+Lightning 已经能够访问 Preview Deployment，Vercel Deployment Protection 已关闭后，返回从：
+
+```text
+401 Protected deployment
+```
+
+变成：
+
+```text
+401 {"error":"Unauthorized"}
+```
+
+进一步检查发现 `middleware.ts` 对所有 `/api/*` 默认要求浏览器 `auth_token` Cookie，而 Lightning 是机器客户端，不可能携带该 Cookie。因此请求在 Next.js Route Handler 之前就被 middleware 返回 401，`/api/worker/next` 的 `authenticateWorker()` 实际上没有机会执行。
+
+修复：
+
+```text
+/api/worker/*
+    ↓
+跳过 auth_token middleware
+    ↓
+/api/worker/* Route Handler
+    ↓
+Bearer <short-lived Worker Credential>
+    ↓
+lib/worker-auth.ts
+```
+
+普通页面和其它 API 仍然使用原来的 `auth_token` Cookie 保护。
+
+这次修改没有削弱 Worker Bridge 的认证：Worker Bridge 不是匿名开放，而是把认证责任从浏览器 Cookie middleware 转移到专门的短期 Worker Credential。
 
 ## 已完成
 
@@ -27,6 +62,9 @@
 - Lightning Studio 直接 FastAPI 调试模式，不使用 Docker，不使用 Lightning Platform API Key。
 - `LIGHTNING_API_URL` 自动规范化为 `/process-queue`。
 - Preview hostname 动态传递到 Lightning。
+- 修复 Lightning Bridge URL 从 `/api/worker/api/worker/next` 重复拼接为正确的 `/api/worker/next`。
+- 区分 Vercel Deployment Protection 401 与 Worker Credential 401。
+- 修复 `middleware.ts` 对 `/api/worker/*` 的错误 cookie 鉴权拦截。
 
 ## 状态请求策略
 
@@ -120,11 +158,12 @@ Backend：`agent/queue-worker-bridge`
 
 ## 下一步
 
-1. 部署最新 Frontend Preview。
-2. 关闭旧 Preview 标签页并重新打开最新 Preview，避免旧 JS 继续请求 `/api/jobs/status`。
+1. 部署最新 Frontend Preview，使 `middleware.ts` 修改生效。
+2. 关闭旧 Preview 标签页并重新打开最新 Preview。
 3. 点击“清除当前历史记录”，确认回到 idle/0 jobs。
 4. 提交 1 个任务并手动刷新确认 queued。
 5. 点击开始处理。
-6. Lightning 日志确认真实 Preview `vercel_origin`。
-7. 验证 Worker → `/api/worker/next`。
-8. 认证通过后继续 R2 → inference → complete → finish。
+6. Lightning 日志确认请求 URL：`https://<preview-host>/api/worker/next`。
+7. 确认这次不再出现 Vercel Protection 401，也不再被 middleware 返回 `{"error":"Unauthorized"}`。
+8. 观察 `/api/worker/next` 是否返回 200，并确认出现 Job claim。
+9. 继续验证 R2 → inference → complete → finish。
