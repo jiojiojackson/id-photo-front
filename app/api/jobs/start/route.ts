@@ -16,8 +16,6 @@ export async function POST(request: NextRequest) {
     if (!lightningUrl) {
       return NextResponse.json({ error: "LIGHTNING_API_URL 未配置" }, { status: 500 });
     }
-    // Debug mode is intended for the Linux/Lightning Studio FastAPI instance.
-    // That server is directly exposed and does not use the Lightning platform API key.
     if (!debugDirectBackend && !lightningKey) {
       return NextResponse.json({ error: "LIGHTNING_API_KEY 未配置" }, { status: 500 });
     }
@@ -78,10 +76,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ status: claimed.reason, queued: claimed.count }, { status: 200 });
     }
 
-    // In production, Lightning_API_KEY authenticates the platform wake request.
-    // In debug mode, the URL points directly to the FastAPI server in Lightning Studio,
-    // so no platform Authorization header is sent.
-    const bridgeUrl = new URL("/api/worker", request.url).toString();
+    // The request reaches the currently deployed Vercel Preview/Production hostname.
+    // Pass this origin explicitly to Lightning so the Worker never has to guess the
+    // Vercel hostname from an environment variable or a hard-coded domain.
+    const vercelOrigin = request.nextUrl.origin;
+    const bridgeUrl = `${vercelOrigin}/api/worker`;
     const wakeHeaders: Record<string, string> = {
       "Content-Type": "application/json",
     };
@@ -89,12 +88,20 @@ export async function POST(request: NextRequest) {
       wakeHeaders.Authorization = `Bearer ${lightningKey}`;
     }
 
+    console.log("[WorkerStart] Vercel bridge origin", {
+      origin: vercelOrigin,
+      bridgeUrl,
+      workerRunId,
+      debugDirectBackend,
+    });
+
     const wakeResponse = await fetch(buildLightningProcessQueueUrl(lightningUrl), {
       method: "POST",
       headers: wakeHeaders,
       body: JSON.stringify({
         worker_run_id: workerRunId,
         bridge_url: bridgeUrl,
+        vercel_origin: vercelOrigin,
         worker_credential: credential,
         worker_credential_expires_at: expiresAt.toISOString(),
       }),
