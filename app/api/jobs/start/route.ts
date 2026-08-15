@@ -26,12 +26,30 @@ export async function POST(request: NextRequest) {
         FOR UPDATE
       `;
 
-      if (state[0]?.status !== "idle") {
-        return { started: false, reason: "already_running" as const, count: 0 };
+      if (state[0]?.status !== "idle" && state[0]?.active_run_id) {
+        const active = await tx`
+          SELECT status, credential_expires_at
+          FROM photo_worker_runs
+          WHERE id = ${String(state[0].active_run_id)}
+          FOR UPDATE
+        `;
+        const expired = !active[0] || active[0].status IN ('completed','failed') || new Date(active[0].credential_expires_at).getTime() <= Date.now();
+        if (!expired) return { started: false, reason: "already_running" as const, count: 0 };
+
+        await tx`
+          UPDATE photo_worker_runs
+          SET status = 'failed', finished_at = NOW(), error = 'worker credential expired or run became stale'
+          WHERE id = ${String(state[0].active_run_id)} AND status IN ('starting','running')
+        `;
+        await tx`
+          UPDATE photo_worker_state
+          SET status = 'idle', active_run_id = NULL, updated_at = NOW()
+          WHERE id = 1
+        `;
+      } else if (state[0]?.status !== "idle") {
+        await tx`UPDATE photo_worker_state SET status = 'idle', active_run_id = NULL, updated_at = NOW() WHERE id = 1`;
       }
 
-      // A crashed worker may leave processing jobs behind. They become eligible
-      // again only after their lease expires; the bridge will atomically claim them.
       const pending = await tx`
         SELECT COUNT(*)::int AS count
         FROM photo_jobs
@@ -53,7 +71,6 @@ export async function POST(request: NextRequest) {
         SET status = 'starting', active_run_id = ${workerRunId}, started_at = NOW(), updated_at = NOW()
         WHERE id = 1
       `;
-
       return { started: true, reason: "started" as const, count };
     });
 
@@ -61,13 +78,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ status: claimed.reason, queued: claimed.count }, { status: 200 });
     }
 
+    // Lightning is stateless. It receives everything it needs for this run;
+    // the application itself does not need LIGHTNING_* environment variables.
     const bridgeUrl = new URL("/api/worker", request.url).toString();
     const wakeResponse = await fetch(lightningUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        // This is the Lightning platform's external API credential. It is not
-        // configured inside the Lightning application/container.
+        // Platform-issued credential used only by Vercel to wake Lightning.
         Authorization: `Bearer ${lightningKey}`,
       },
       body: JSON.stringify({
@@ -81,28 +99,15 @@ export async function POST(request: NextRequest) {
 
     if (!wakeResponse.ok) {
       await sql.begin(async (tx) => {
-        await tx`
-          UPDATE photo_worker_runs
-          SET status = 'failed', finished_at = NOW(), error = ${`Lightning wake failed: ${wakeResponse.status}`}
-          WHERE id = ${workerRunId}
-        `;
-        await tx`
-          UPDATE photo_worker_state
-          SET status = 'idle', active_run_id = NULL, updated_at = NOW()
-          WHERE id = 1 AND active_run_id = ${workerRunId}
-        `;
+        await tx`UPDATE photo_worker_runs SET status = 'failed', finished_at = NOW(), error = ${`Lightning wake failed: ${wakeResponse.status}`} WHERE id = ${workerRunId}`;
+        await tx`UPDATE photo_worker_state SET status = 'idle', active_run_id = NULL, updated_at = NOW() WHERE id = 1 AND active_run_id = ${workerRunId}`;
       });
       return NextResponse.json({ error: `启动 Lightning 失败 (${wakeResponse.status})` }, { status: 502 });
     }
 
     await sql.begin(async (tx) => {
-      await tx`
-        UPDATE photo_worker_runs SET status = 'running' WHERE id = ${workerRunId} AND status = 'starting'
-      `;
-      await tx`
-        UPDATE photo_worker_state SET status = 'running', updated_at = NOW()
-        WHERE id = 1 AND active_run_id = ${workerRunId}
-      `;
+      await tx`UPDATE photo_worker_runs SET status = 'running' WHERE id = ${workerRunId} AND status = 'starting'`;
+      await tx`UPDATE photo_worker_state SET status = 'running', updated_at = NOW() WHERE id = 1 AND active_run_id = ${workerRunId}`;
     });
 
     return NextResponse.json({
@@ -115,16 +120,8 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error(error);
     if (workerRunId) {
-      await sql`
-        UPDATE photo_worker_runs
-        SET status = 'failed', finished_at = NOW(), error = ${error instanceof Error ? error.message : "启动处理失败"}
-        WHERE id = ${workerRunId} AND status IN ('starting','running')
-      `.catch(() => undefined);
-      await sql`
-        UPDATE photo_worker_state
-        SET status = 'idle', active_run_id = NULL, updated_at = NOW()
-        WHERE id = 1 AND active_run_id = ${workerRunId}
-      `.catch(() => undefined);
+      await sql`UPDATE photo_worker_runs SET status = 'failed', finished_at = NOW(), error = ${error instanceof Error ? error.message : "启动处理失败"} WHERE id = ${workerRunId} AND status IN ('starting','running')`.catch(() => undefined);
+      await sql`UPDATE photo_worker_state SET status = 'idle', active_run_id = NULL, updated_at = NOW() WHERE id = 1 AND active_run_id = ${workerRunId}`.catch(() => undefined);
     }
     return NextResponse.json({ error: error instanceof Error ? error.message : "启动处理失败" }, { status: 500 });
   }
