@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, useEffect, useRef, useState } from "react";
+import { ChangeEvent, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 
 const PRESETS = [
@@ -58,6 +58,7 @@ export default function Home() {
   const [dpi, setDpi] = useState(300);
   const [submitting, setSubmitting] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
   const [queued, setQueued] = useState(0);
   const [counts, setCounts] = useState({ queued: 0, processing: 0, completed: 0, failed: 0, total: 0 });
@@ -67,26 +68,19 @@ export default function Home() {
   const [loggingOut, setLoggingOut] = useState(false);
 
   async function refreshStatus() {
+    setRefreshing(true);
     try {
       const response = await fetch("/api/jobs/status", { cache: "no-store" });
       if (!response.ok) return;
       const data = await response.json();
       setCounts(data.counts); setQueued(data.counts.queued); setWorkerStatus(data.worker?.status || "idle"); setJobs(data.jobs || []);
-      const finished = (data.jobs || []).filter((j: Job) => j.status === "completed");
-      if (finished.length) {
-        const times: number[] = (data.jobs || [])
-          .map((j: TimedJob) => j.processing_time_ms)
-          .filter((n: number | undefined): n is number => typeof n === "number" && n > 0);
-        if (times.length) setAvgSeconds(Math.max(5, times.reduce((a: number, b: number) => a + b, 0) / times.length / 1000));
-      }
-    } catch { /* transient polling failure */ }
+      const times: number[] = (data.jobs || [])
+        .map((j: TimedJob) => j.processing_time_ms)
+        .filter((n: number | undefined): n is number => typeof n === "number" && n > 0);
+      if (times.length) setAvgSeconds(Math.max(5, times.reduce((a: number, b: number) => a + b, 0) / times.length / 1000));
+    } catch { /* manual refresh can fail transiently */ }
+    finally { setRefreshing(false); }
   }
-
-  useEffect(() => {
-    refreshStatus();
-    const timer = window.setInterval(refreshStatus, 2500);
-    return () => window.clearInterval(timer);
-  }, []);
 
   function handleFile(selected: File) {
     if (preview) URL.revokeObjectURL(preview);
@@ -169,11 +163,14 @@ export default function Home() {
           <div><strong style={{ fontSize: 24 }}>{counts.processing}</strong><div className="hint">处理中</div></div>
           <div><strong style={{ fontSize: 24 }}>{counts.completed}</strong><div className="hint">已完成</div></div>
         </div>
-        <button className="generate" onClick={submitJobs} disabled={!file || submitting}>{submitting ? "正在提交…" : "提交任务（加入队列）"}</button>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <button className="generate" onClick={submitJobs} disabled={!file || submitting}>{submitting ? "正在提交…" : "提交任务（加入队列）"}</button>
+          <button className="generate" onClick={refreshStatus} disabled={refreshing}>{refreshing ? "正在刷新…" : "刷新任务状态"}</button>
+        </div>
         <button className="generate" onClick={startProcessing} disabled={!canStart} style={{ marginTop: 10, opacity: canStart ? 1 : 0.55 }}>
           {starting || workerStatus === "starting" ? "正在唤醒 Lightning…" : workerStatus === "running" ? `处理中（${counts.processing} 个）` : queued ? `开始处理（${queued} 个任务）` : "开始处理（0 个任务）"}
         </button>
-        <div className="hint" style={{ textAlign: "center", marginTop: 10 }}>{queued ? `根据历史处理速度，预计 ${estimate}。点击开始后才生成临时 R2 URL 并唤醒 Lightning。` : "可以先提交任务，等任务攒好后再开始处理。"}</div>
+        <div className="hint" style={{ textAlign: "center", marginTop: 10 }}>{queued ? `根据历史处理速度，预计 ${estimate}。点击开始后才生成临时 R2 URL 并唤醒 Lightning。` : "可以先提交任务，等任务攒好后再开始处理。任务状态不会自动轮询，请按需点击“刷新任务状态”。"}</div>
         {error && <div className="error">{error}</div>}
       </section>
 
