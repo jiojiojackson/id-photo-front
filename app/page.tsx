@@ -59,6 +59,7 @@ export default function Home() {
   const [submitting, setSubmitting] = useState(false);
   const [starting, setStarting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const [error, setError] = useState("");
   const [queued, setQueued] = useState(0);
   const [counts, setCounts] = useState({ queued: 0, processing: 0, completed: 0, failed: 0, total: 0 });
@@ -80,6 +81,21 @@ export default function Home() {
       if (times.length) setAvgSeconds(Math.max(5, times.reduce((a: number, b: number) => a + b, 0) / times.length / 1000));
     } catch { /* manual refresh can fail transiently */ }
     finally { setRefreshing(false); }
+  }
+
+  async function resetHistory() {
+    if (resetting) return;
+    const confirmed = window.confirm("确定清除当前所有任务和历史记录吗？\n\n这会删除当前 Job、请求记录和 Worker Run，无法恢复。\n如果 Lightning 正在处理任务，请先确认它已经停止。\n\n清除后会回到初始状态。" );
+    if (!confirmed) return;
+    setResetting(true); setError("");
+    try {
+      const response = await fetch("/api/jobs/reset", { method: "POST" });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(data?.error || `清除失败 (${response.status})`);
+      setCounts({ queued: 0, processing: 0, completed: 0, failed: 0, total: 0 });
+      setQueued(0); setWorkerStatus("idle"); setJobs([]);
+    } catch (err) { setError(err instanceof Error ? err.message : "清除历史记录失败"); }
+    finally { setResetting(false); }
   }
 
   function handleFile(selected: File) {
@@ -169,6 +185,9 @@ export default function Home() {
         </div>
         <button className="generate" onClick={startProcessing} disabled={!canStart} style={{ marginTop: 10, opacity: canStart ? 1 : 0.55 }}>
           {starting || workerStatus === "starting" ? "正在唤醒 Lightning…" : workerStatus === "running" ? `处理中（${counts.processing} 个）` : queued ? `开始处理（${queued} 个任务）` : "开始处理（0 个任务）"}
+        </button>
+        <button onClick={resetHistory} disabled={resetting || starting} style={{ width: "100%", marginTop: 10, padding: "10px 14px", border: "1px solid #fecaca", borderRadius: 8, background: "#fff1f2", color: "#b91c1c", fontWeight: 600, cursor: resetting ? "wait" : "pointer" }}>
+          {resetting ? "正在清除历史记录…" : "清除当前历史记录"}
         </button>
         <div className="hint" style={{ textAlign: "center", marginTop: 10 }}>{queued ? `根据历史处理速度，预计 ${estimate}。点击开始后才生成临时 R2 URL 并唤醒 Lightning。` : "可以先提交任务，等任务攒好后再开始处理。任务状态不会自动轮询，请按需点击“刷新任务状态”。"}</div>
         {error && <div className="error">{error}</div>}
