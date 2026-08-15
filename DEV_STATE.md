@@ -45,11 +45,72 @@
 - 保留 `/generate` 同步 API 作为单张图片手动/回归测试接口。
 - Lightning 后端不依赖项目级 `LIGHTNING_*`、Database、R2、Queue 环境变量。
 
+## 联合调试最新进度
+
+2026-08-15 首次真实联调已定位到 Lightning Wake URL 路径问题：
+
+```text
+Vercel POST /api/jobs/start
+  ↓
+POST LIGHTNING_API_URL
+  ↓
+Lightning 实例成功被唤醒
+  ↓
+FastAPI 收到 POST /
+  ↓
+405 Method Not Allowed
+```
+
+Vercel `/api/jobs/start` 因此返回 `502`，前端显示“启动 Lightning 失败 (405)”。Lightning 实例日志已确认：
+
+```text
+INFO: 130.211.236.75:0 - "POST / HTTP/1.1" 405 Method Not Allowed
+```
+
+### 已确认共识
+
+`LIGHTNING_API_URL` 当前指向 Lightning 服务根路径 `/`，而不是应用 Worker endpoint `/process-queue`。
+
+因此：
+
+```text
+当前：POST https://<lightning-host>/
+正确：POST https://<lightning-host>/process-queue
+```
+
+后端 FastAPI 本身已经定义：
+
+```python
+@app.post("/process-queue")
+```
+
+问题发生在 Wake URL 路径，没有证据表明 Queue、Neon、R2 或 GPU 推理逻辑有问题。
+
+### 当前代码修复
+
+`app/api/jobs/start/route.ts` 已修改：
+
+- 在 Vercel 端对 `LIGHTNING_API_URL` 自动追加 `/process-queue`（如果尚未包含）。
+- 保持兼容已经配置为 `/process-queue` 的 URL，避免重复追加。
+- Lightning Wake 失败时读取 response body，并把 HTTP status、statusText、body 前 1000 字符写入 `photo_worker_runs.error` 和 Vercel Runtime Log，便于下一轮联合调试。
+
+当前 commit：`93d218f2b0a807e58bdf963d9b259e6edc97dd6f`。
+
 ## 当前重要实现约定
 
 ### Lightning 无状态
 
 Lightning 容器不配置项目环境变量。Vercel 使用平台提供的 `LIGHTNING_API_URL` 和 `LIGHTNING_API_KEY` 唤醒 Lightning；短期 Worker Credential 通过请求 body 传递给 Lightning。
+
+### Lightning Wake URL
+
+正式调用 endpoint 必须是：
+
+```text
+POST ${LIGHTNING_API_URL}/process-queue
+```
+
+Vercel 代码会在 `LIGHTNING_API_URL` 未包含 `/process-queue` 时自动追加该路径。
 
 ### R2 URL 生命周期
 
@@ -109,16 +170,18 @@ next build
 
 ## 下一步
 
-1. 确认最新 Preview Build 成功，并检查 migration 日志出现 `001_initial applied`（首次部署）或 `001_initial already applied`。
-2. 配置/确认 Lightning 的公网 wake endpoint 能把 Vercel wake body 原样交给 `/process-queue`。
-3. 真实测试 3 个 Job：提交 → queued → 开始 → Lightning 唤醒 → 依次 claim → R2 输入/输出 → completed。
-4. 测试重复点击开始、Worker 崩溃、lease 到期、重复 complete、单 Job fail/retry。
-5. 测量实际推理时间后调整 lease、heartbeat 和 presigned URL 有效期。
-6. 验证前后端完整生产链路后，合并 `id-photo-back` Draft PR #2 和 Frontend 分支到 `main`。
+1. 部署当前 `93d218f2b0a807e58bdf963d9b259e6edc97dd6f` 到 Vercel Preview/Production。
+2. 重新点击“开始处理”，确认 Lightning 日志从 `POST / 405` 变为 `POST /process-queue`。
+3. 确认 FastAPI `/process-queue` 返回 `200`，并开始调用 Vercel Bridge `/api/worker/next`。
+4. 联调 1 个 Job：claim → R2 input GET → GPU inference → R2 output PUT → complete。
+5. 联调成功后再测试 3 Job 串行处理。
+6. 测试 heartbeat、Worker 崩溃、lease 到期、重复 complete、单 Job fail/retry。
+7. 测量实际推理时间后调整 lease、heartbeat 和 presigned URL 有效期。
+8. 验证前后端完整生产链路后，合并 `id-photo-back` Draft PR #2 和 Frontend 分支到 `main`。
 
 ## 当前未确认
 
-- 尚未完成真实 Lightning 公网 wake endpoint → `/process-queue` 联调。
+- `/process-queue` 尚未完成真实成功调用验证。
 - 尚未完成真实 Lightning Worker 与 Vercel Bridge 的端到端联调。
 - 尚未确认 3 Job 串行处理和 Worker 崩溃恢复的生产结果。
 - 尚未根据真实 Lightning p95 / 最大推理时间校准 lease、heartbeat 和 presigned URL。
