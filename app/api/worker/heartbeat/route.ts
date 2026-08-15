@@ -14,15 +14,29 @@ export async function POST(request: Request) {
   const jobId = String(body.jobId || "");
   if (!jobId) return NextResponse.json({ error: "jobId is required" }, { status: 400 });
 
-  const rows = await sql`
-    UPDATE photo_jobs
-    SET lease_expires_at = NOW() + (${LEASE_EXTENSION_SECONDS} || ' seconds')::interval
-    WHERE id = ${jobId}
-      AND status = 'processing'
-      AND worker_run_id = ${String(worker.id)}
-      AND lease_expires_at > NOW()
-    RETURNING lease_expires_at
-  `;
+  const runId = String(worker.id);
+  const rows = await sql.begin(async (tx) => {
+    const leaseRows = await tx`
+      UPDATE photo_jobs
+      SET lease_expires_at = NOW() + (${LEASE_EXTENSION_SECONDS} || ' seconds')::interval
+      WHERE id = ${jobId}
+        AND status = 'processing'
+        AND worker_run_id = ${runId}
+        AND lease_expires_at > NOW()
+      RETURNING lease_expires_at
+    `;
+
+    if (!leaseRows.length) return [];
+
+    await tx`
+      UPDATE photo_worker_runs
+      SET last_seen_at = NOW()
+      WHERE id = ${runId} AND status IN ('starting', 'running')
+    `;
+
+    return leaseRows;
+  });
+
   if (!rows.length) return NextResponse.json({ error: "job lease is no longer valid" }, { status: 409 });
   return NextResponse.json({ ok: true, leaseExpiresAt: rows[0].lease_expires_at });
 }
