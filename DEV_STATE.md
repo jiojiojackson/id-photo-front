@@ -2,154 +2,58 @@
 
 当前开发分支：`agent/queue-worker-bridge`
 
-本项目是 Vercel + Neon + R2 + Vercel Queue + Lightning 的异步证件照前端。提交任务与开始处理分离：提交只创建 Job/Queue；点击开始才创建 Worker Run、短期 Worker Credential 并唤醒 Lightning。
+本项目正式前端架构为 Vercel + Neon + R2 + Vercel Queue + Lightning。后端 `id-photo-back` 已调试完成，本阶段不修改后端。
 
-## 当前状态
+## 当前 Production 状态
 
-- `/api/jobs/status` 已改为**完全手动刷新**；前端不再设置任何自动 status timer。
-- 用户点击“刷新任务状态”时才请求 `/api/jobs/status`。
-- `/api/jobs/start` 仍只有在用户明确点击“开始处理”时调用，并负责唤醒 Lightning。
-- `/api/jobs/status` 可以在 PostgreSQL 内执行 stale Worker reconcile，但**绝不访问 Lightning、绝不调用 process-queue、绝不重新唤醒 Worker**。
-- Worker Bridge `/api/worker/*` 由 Lightning 主动访问 Vercel，使用短期 Worker Credential，不使用浏览器 Cookie。
-- 新增“清除当前历史记录”按钮和 `POST /api/jobs/reset`。
-- reset 会清空当前 Job、请求记录、Worker Run，并将 Worker State 恢复为 idle。
-- reset 不是部署操作，不会自动执行。
-- 已修复 Worker Bridge 被全局 cookie middleware 拦截的问题。
-- 已实现 Worker 失联 → Job failed 状态传播：status reconcile 在 stale window 后将仍为 `processing` 的 Job 标记为 `failed`，并将 Worker State 恢复为 `idle`。
+前端已经从 Debug/开发模式收敛为正式 Lightning Platform 调用模式。
 
-## Vercel Build 状态
+- 已删除 `DEBUG_DIRECT_BACKEND` 代码逻辑。
+- `/api/jobs/start` 必须同时配置 `LIGHTNING_API_URL` 和 `LIGHTNING_API_KEY`。
+- 唤醒 Lightning 时固定使用 `Authorization: Bearer <LIGHTNING_API_KEY>`。
+- Worker Credential 仍由 Vercel 在开始处理时生成，短期有效，只保存 hash 到 Neon，并通过 wake payload 传给 Lightning。
+- `bridge_url` / `vercel_origin` 使用当前 Vercel 请求 origin 动态生成，不硬编码域名。
+- `/api/jobs/status` 仍然只访问 Neon/Queue，不访问 Lightning、不调用 `/process-queue`、不重新唤醒 Worker。
+- 前端没有自动 status polling；只有提交成功、开始成功或用户手动点击刷新时请求状态。
+- `id-photo-back` 保持当前已调试版本，不需要修改。
 
-最近一次 Frontend Preview Deployment 因 TypeScript 类型检查失败：
+## Production 环境变量
 
-```text
-./app/api/worker/heartbeat/route.ts:41:56
-Type error: Object is of type 'unknown'.
-```
-
-原因是 postgres tagged-template 查询结果在当前类型定义下为 `unknown[]`，直接访问：
-
-```ts
-rows[0].lease_expires_at
-```
-
-会在 `next build` 的 type check 阶段失败。
-
-已在 `agent/queue-worker-bridge` 修复为显式结果类型：
-
-```ts
-type LeaseRow = { lease_expires_at: Date | string };
-const leaseRows = await tx<LeaseRow[]>`...`;
-```
-
-修复提交：`1af3e2b6e55b3a6f62eef2e10be59a2ddded8de5`
-
-本次修复只改变 TypeScript 类型声明，不改变 heartbeat 的数据库逻辑、lease 时间或 Worker 行为。
-
-## Worker 真实状态与失联恢复
-
-当前状态源是 Neon 数据库，而不是前端按钮状态：
+Vercel Production 应配置：
 
 ```text
-queued
-  ↓
-processing
-  ├─ complete → completed
-  ├─ fail → queued / failed（取决于 attempt_count）
-  └─ Worker 失联超过 120 秒 → failed
+DATABASE_URL
+R2_ACCOUNT_ID
+R2_ACCESS_KEY_ID
+R2_SECRET_ACCESS_KEY
+R2_BUCKET_NAME
+VERCEL_QUEUE_NAME
+VERCEL_QUEUE_REGION
+VERCEL_QUEUE_CONSUMER_GROUP
+LIGHTNING_API_URL
+LIGHTNING_API_KEY
 ```
 
-Worker Run：
+`DEBUG_DIRECT_BACKEND` 已从代码删除。Vercel Project Settings 中如果仍存在该旧变量，可以删除；代码不会再读取它。
 
-```text
-starting / running
-       ↓
-正常 finish → completed
-       ↓
-后端/Lightning 崩溃 → last_seen_at 停止更新
-       ↓
-超过 120 秒
-       ↓
-用户手动刷新 /api/jobs/status
-       ↓
-Worker Run → failed
-processing Jobs → failed
-photo_worker_state → idle
-```
+Lightning 本身不需要项目级 Database、R2、Queue 环境变量。Vercel → Lightning 使用 `LIGHTNING_API_KEY` 做平台认证；Lightning → Vercel Bridge 使用 wake payload 中的短期 Worker Credential。
 
-重要：Worker 失联的 Job 不自动重新排队，而是直接标记 `failed`。主动调用 `/api/worker/fail` 的单 Job 错误仍保留原有 `MAX_ATTEMPTS=5` 重试逻辑。
-
-## last_seen_at
-
-以下 Worker Bridge 请求会刷新 `photo_worker_runs.last_seen_at`：
-
-- `POST /api/worker/next`
-- `POST /api/worker/heartbeat`
-- `POST /api/worker/complete`
-- `POST /api/worker/fail`
-- `POST /api/worker/finish`
-
-因此长时间 inference 期间由 Lightning heartbeat 保持 Worker Run 活跃；如果整个后端进程崩溃，heartbeat 也会停止，最终进入 stale 状态。
-
-## 状态 API reconcile
-
-`GET /api/jobs/status` 在读取统计信息前会执行一次 stale Worker reconcile：
-
-```text
-credential expired OR last_seen_at <= NOW() - 120 seconds
-        ↓
-processing jobs → failed
-worker run → failed
-worker state → idle
-```
-
-这个 reconcile 只操作 Vercel/Neon 数据，不会向 Lightning 发起任何网络请求，也不会启动新的 Worker。
-
-## 前端状态请求策略
-
-当前代码没有 `setInterval`、`setTimeout` 或其它自动 `/api/jobs/status` 轮询。
-
-请求规则固定为：
-
-- 页面打开：不自动请求。
-- 提交任务成功：调用一次 `refreshStatus()`。
-- 点击开始处理成功：调用一次 `refreshStatus()`。
-- 点击“刷新任务状态”：请求一次。
-- Worker 处理过程中：不自动检查。
-- Worker 崩溃后：不会自动唤醒，也不会自动请求 status；用户手动刷新后，由 status API 做 stale reconcile。
-
-这与当前设计原则一致：**只有用户明确点击“开始处理”才能产生唤醒 Lightning 的请求；查看状态不能唤醒 Lightning。**
-
-## API 单向访问规则
+## 正式版 Lightning 调用链
 
 ```text
 用户点击“开始处理”
-    ↓
-/api/jobs/start
-    ↓
-Lightning /process-queue
-```
-
-只有上述路径负责唤醒 Lightning。
-
-```text
-用户点击“刷新任务状态”
-    ↓
-GET /api/jobs/status
-    ↓
-Neon DB / Queue 状态
-```
-
-`/api/jobs/status`：
-
-- 不访问 `LIGHTNING_API_URL`。
-- 不调用 `process-queue`。
-- 不调用 wake Lightning。
-- 不因为 stale Worker 而重新启动 Worker。
-- 可以将 stale processing Job 在数据库中标记为 failed。
-
-Lightning → Vercel：
-
-```text
+        ↓
+POST /api/jobs/start
+        ↓
+Neon 创建 worker_run
+        ↓
+生成短期 Worker Credential
+        ↓
+POST LIGHTNING_API_URL/process-queue
+Authorization: Bearer LIGHTNING_API_KEY
+        ↓
+Lightning Worker
+        ↓
 POST /api/worker/next
 POST /api/worker/heartbeat
 POST /api/worker/complete
@@ -157,48 +61,109 @@ POST /api/worker/fail
 POST /api/worker/finish
 ```
 
-## Bridge 认证
+`/api/jobs/start` 是唯一允许产生 Vercel → Lightning 唤醒请求的入口。
 
-`/api/worker/*` 是机器到机器的接口，不使用浏览器登录 Cookie。Next.js middleware 对这些路径放行，由 `lib/worker-auth.ts` 使用短期 Worker Credential 认证。
+## 状态与 Worker 失联
 
-```text
-Authorization: Bearer <short-lived Worker Credential>
-        ↓
-SHA-256
-        ↓
-photo_worker_runs.credential_hash
-        ↓
-expires_at + status 检查
-```
+Worker Bridge 会通过 `next`、`heartbeat`、`complete`、`fail`、`finish` 更新 `photo_worker_runs.last_seen_at`。
 
-普通页面和其它 API 仍使用 `auth_token` Cookie。
-
-## 清除历史记录
-
-新增：
+如果 Lightning/Worker 整体崩溃，heartbeat 停止。超过 120 秒后，用户手动刷新 `/api/jobs/status` 时执行 stale reconcile：
 
 ```text
-POST /api/jobs/reset
+processing Job
+      ↓
+Worker Run stale / credential expired
+      ↓
+Job → failed
+Worker Run → failed
+photo_worker_state → idle
 ```
 
-执行：
+失联 Job 不自动重新排队，也不会因为 status reconcile 自动重新唤醒 Lightning。单个 Job 主动调用 `/api/worker/fail` 时仍保留原有 `MAX_ATTEMPTS=5` 重试逻辑。
 
-```sql
-TRUNCATE TABLE photo_jobs, photo_requests, photo_worker_runs RESTART IDENTITY CASCADE;
-```
+## 前端状态请求规则
 
-并将：
+- 页面打开：不自动请求 status。
+- 提交任务成功：刷新一次。
+- 开始处理成功：刷新一次。
+- 用户点击“刷新任务状态”：请求一次。
+- 处理过程中：不自动请求。
+- Worker 崩溃后：不自动请求、不自动唤醒。
+- 用户手动刷新后：status API 在 Neon 内执行 stale reconcile，并返回真实 `failed` 状态。
+
+核心原则：**查看状态和唤醒 Lightning 完全解耦。**
+
+## API 单向访问边界
 
 ```text
-photo_worker_state.status = idle
-photo_worker_state.active_run_id = NULL
+用户点击开始
+    ↓
+/api/jobs/start
+    ↓
+Lightning /process-queue
 ```
 
-这是开发/调试阶段的全局管理功能，正式生产环境需要增加管理员权限或用户隔离。
+```text
+用户点击刷新
+    ↓
+/api/jobs/status
+    ↓
+Neon / Queue
+```
 
-## 数据库 Migration
+`/api/jobs/status` 禁止：
 
-Vercel build 已自动执行：
+- 访问 `LIGHTNING_API_URL`
+- 调用 `/process-queue`
+- 调用 wake Lightning
+- 因 stale 自动创建 Worker Run
+
+Lightning → Vercel Bridge 允许：
+
+```text
+/api/worker/next
+/api/worker/heartbeat
+/api/worker/complete
+/api/worker/fail
+/api/worker/finish
+```
+
+这些接口使用短期 Worker Credential，不使用浏览器 Cookie。
+
+## Vercel Build 修复
+
+此前 `app/api/worker/heartbeat/route.ts` 因 postgres 查询结果在 TypeScript 中被推断为 `unknown[]`，导致 Vercel build 在 type check 阶段失败：
+
+```text
+Type error: Object is of type 'unknown'.
+```
+
+已通过显式 `LeaseRow` 类型修复：
+
+```ts
+type LeaseRow = { lease_expires_at: Date | string };
+const leaseRows = await tx<LeaseRow[]>`...`;
+```
+
+该修复只解决类型检查，不改变 heartbeat、lease 或数据库业务逻辑，也不需要 migration。
+
+修复提交：`1af3e2b6e55b3a6f62eef2e10be59a2ddded8de5`
+
+## Production 收敛
+
+正式版提交：`da10e349af270e7e5546d4a82bd7ff9b64d30dc3`
+
+本提交：
+
+1. 删除 `DEBUG_DIRECT_BACKEND`。
+2. 强制 `LIGHTNING_API_KEY`。
+3. Lightning wake 请求固定携带 Bearer API Key。
+4. 保留 Worker Credential、Bridge、动态 Vercel origin 和 stale reconcile。
+5. 不修改后端仓库。
+
+## Migration
+
+Vercel build 自动执行：
 
 ```text
 npm run db:migrate
@@ -206,25 +171,22 @@ npm run db:migrate
 next build
 ```
 
-当前 heartbeat 类型修复不需要新的 migration，因为只涉及 TypeScript 类型，不改变数据库 schema。
+本次 Production 收敛没有数据库 schema 变化，不需要新的 migration。
 
 ## 当前分支
 
 Frontend：`agent/queue-worker-bridge`
 
-Backend：`agent/queue-worker-bridge`
+Backend：`agent/queue-worker-bridge`（本阶段未修改）
 
-## 下一步
+## Production 验证清单
 
-1. 等待本次 `1af3e2b6e55b3a6f62eef2e10be59a2ddded8de5` 自动触发的 Vercel Preview Build。
-2. 确认 TypeScript type check 通过。
-3. 重新检查 `/api/jobs/status` 不存在任何 Lightning 网络调用。
-4. 关闭旧 Preview 标签页并打开最新 Preview。
-5. 点击“清除当前历史记录”，确认回到 idle/0 jobs。
-6. 提交 1 个任务并手动刷新确认 queued。
-7. 点击开始处理，确认只有 `/api/jobs/start` 唤醒 Lightning。
-8. Lightning 日志确认请求 URL：`https://<preview-host>/api/worker/next`。
-9. 确认 R2 → inference → complete → finish 正常。
-10. 故意停止 Lightning 后端，等待超过 120 秒。
-11. 手动点击“刷新任务状态”，确认 processing Job 变为 failed，Worker 状态回到 idle，并确认没有新的 Lightning 唤醒请求。
-12. 再测试正常 3 Job 串行、heartbeat、lease recovery、重复 complete、fail/retry。
+1. Vercel Production 配置 `LIGHTNING_API_URL` 与 `LIGHTNING_API_KEY`。
+2. 删除 Vercel Project Settings 中遗留的 `DEBUG_DIRECT_BACKEND`（如果存在）。
+3. 确认 Production Build 通过。
+4. 提交任务，确认不会唤醒 Lightning。
+5. 点击开始处理，确认 `/api/jobs/start` 唤醒 Lightning，并发送 Bearer API Key。
+6. 确认 Lightning → Bridge → R2 → inference → complete → finish 正常。
+7. 手动刷新状态，确认不会产生 Lightning 请求。
+8. 停止 Lightning Worker，等待超过 120 秒后手动刷新，确认 Job → failed、Worker State → idle，且不会自动重新唤醒 Lightning。
+9. 最后进行多 Job、heartbeat、lease recovery、重复 complete、fail/retry 的回归测试。
