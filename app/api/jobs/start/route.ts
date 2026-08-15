@@ -19,12 +19,7 @@ export async function POST(request: NextRequest) {
     const expiresAt = credentialExpiryDate();
 
     const claimed = await sql.begin(async (tx) => {
-      const state = await tx`
-        SELECT status, active_run_id
-        FROM photo_worker_state
-        WHERE id = 1
-        FOR UPDATE
-      `;
+      const state = await tx`SELECT status, active_run_id FROM photo_worker_state WHERE id = 1 FOR UPDATE`;
 
       if (state[0]?.status !== "idle" && state[0]?.active_run_id) {
         const active = await tx`
@@ -33,7 +28,9 @@ export async function POST(request: NextRequest) {
           WHERE id = ${String(state[0].active_run_id)}
           FOR UPDATE
         `;
-        const expired = !active[0] || active[0].status IN ('completed','failed') || new Date(active[0].credential_expires_at).getTime() <= Date.now();
+        const expired = !active[0]
+          || ["completed", "failed"].includes(String(active[0].status))
+          || new Date(active[0].credential_expires_at).getTime() <= Date.now();
         if (!expired) return { started: false, reason: "already_running" as const, count: 0 };
 
         await tx`
@@ -41,11 +38,7 @@ export async function POST(request: NextRequest) {
           SET status = 'failed', finished_at = NOW(), error = 'worker credential expired or run became stale'
           WHERE id = ${String(state[0].active_run_id)} AND status IN ('starting','running')
         `;
-        await tx`
-          UPDATE photo_worker_state
-          SET status = 'idle', active_run_id = NULL, updated_at = NOW()
-          WHERE id = 1
-        `;
+        await tx`UPDATE photo_worker_state SET status = 'idle', active_run_id = NULL, updated_at = NOW() WHERE id = 1`;
       } else if (state[0]?.status !== "idle") {
         await tx`UPDATE photo_worker_state SET status = 'idle', active_run_id = NULL, updated_at = NOW() WHERE id = 1`;
       }
@@ -53,18 +46,15 @@ export async function POST(request: NextRequest) {
       const pending = await tx`
         SELECT COUNT(*)::int AS count
         FROM photo_jobs
-        WHERE status = 'queued'
-           OR (status = 'processing' AND lease_expires_at <= NOW())
+        WHERE status = 'queued' OR (status = 'processing' AND lease_expires_at <= NOW())
       `;
       const count = Number(pending[0]?.count || 0);
       if (!count) return { started: false, reason: "empty" as const, count: 0 };
 
       workerRunId = crypto.randomUUID();
       await tx`
-        INSERT INTO photo_worker_runs
-          (id, credential_hash, credential_expires_at, status)
-        VALUES
-          (${workerRunId}, ${credentialHash}, ${expiresAt}, 'starting')
+        INSERT INTO photo_worker_runs (id, credential_hash, credential_expires_at, status)
+        VALUES (${workerRunId}, ${credentialHash}, ${expiresAt}, 'starting')
       `;
       await tx`
         UPDATE photo_worker_state
