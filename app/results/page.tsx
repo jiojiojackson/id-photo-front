@@ -170,7 +170,7 @@ export default function ResultsPage() {
           </div>
           <div className="color-tools">
             <div className="tool-title"><strong>选择背景色</strong><span>{color.toUpperCase()}</span></div>
-            <div className="color-grid">{COLORS.map(([name, value]) => <button key={value} title={name} aria-label={name} className={color === value ? "color-swatch active" : "color-swatch"} style={{ background: value }} onClick={() => applyColor(value)} disabled={previewLoading} />)}</div>
+            <div className="color-grid">{COLORS.map(([name, value]) => <button key={value} title={name} aria-label={name} className={color === value ? "color-swatch active" : "color-swatch"} onClick={() => applyColor(value)} disabled={previewLoading}><i style={{ background: value }}></i><span>{name}</span></button>)}</div>
             <label className="custom-color"><span>自定义颜色</span><input type="color" value={color} onChange={e => applyColor(e.target.value)} disabled={previewLoading} /><code>{color.toUpperCase()}</code></label>
             {editing && <p className="edit-note">只替换与图片边缘连通的背景区域，人物区域保持不变。</p>}
           </div>

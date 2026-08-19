@@ -14,33 +14,25 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     try {
       const response = await fetch("/api/auth/logout", { method: "POST" });
       if (response.ok) router.push("/login");
-    } finally {
-      setLoggingOut(false);
-    }
+    } finally { setLoggingOut(false); }
   }
 
-  const nav = [
-    ["/create", "制作"],
-    ["/jobs", "任务"],
-    ["/results", "结果"],
-  ];
+  const nav = [["/create", "制作"], ["/jobs", "任务"], ["/results", "结果"]];
 
-  return (
-    <div className="app-shell">
-      <header className="topbar">
-        <div className="brand-wrap">
-          <Link href="/create" className="brand">AI 证件照</Link>
-          <span className="brand-sub">简单 · 快速 · 专业</span>
-        </div>
+  return <div className="app-shell">
+    <header className="topbar">
+      <div className="topbar-inner">
+        <Link href="/create" className="brand-wrap" aria-label="AI 证件照首页">
+          <span className="brand-mark">AI</span>
+          <span><strong className="brand">证件照工坊</strong><small className="brand-sub">智能制作 · 即刻交付</small></span>
+        </Link>
         <nav className="nav-tabs" aria-label="主导航">
-          {nav.map(([href, label]) => (
-            <Link key={href} href={href} className={pathname.startsWith(href) ? "nav-tab active" : "nav-tab"}>{label}</Link>
-          ))}
+          {nav.map(([href, label], index) => <Link key={href} href={href} className={pathname.startsWith(href) ? "nav-tab active" : "nav-tab"}><span>{index + 1}</span>{label}</Link>)}
         </nav>
-        <button className="logout-button" onClick={logout} disabled={loggingOut}>{loggingOut ? "退出中" : "退出"}</button>
-      </header>
-      <main className="page-content">{children}</main>
-      <footer className="footer">AI 证件照 · 结果仅在你的任务空间内处理</footer>
-    </div>
-  );
+        <button className="logout-button" onClick={logout} disabled={loggingOut} aria-label="退出登录"><span>↗</span>{loggingOut ? "退出中" : "退出"}</button>
+      </div>
+    </header>
+    <main className="page-content">{children}</main>
+    <footer className="footer"><span>AI 证件照工坊</span><i></i><span>图片仅用于当前任务处理</span></footer>
+  </div>;
 }

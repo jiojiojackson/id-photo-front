@@ -53,15 +53,21 @@ export default function CreatePage() {
     { width: "300", height: "400" },
   ]);
   const [submitting, setSubmitting] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
 
   function handleFile(selected: File) {
+    if (!selected.type.startsWith("image/")) { setError("请选择 JPG、PNG 或其他常见图片格式"); return; }
     if (preview) URL.revokeObjectURL(preview);
     setFile(selected); setPreview(URL.createObjectURL(selected)); setError("");
   }
   function onFileChange(e: ChangeEvent<HTMLInputElement>) { const selected = e.target.files?.[0]; if (selected) handleFile(selected); }
+  function onDrop(e: React.DragEvent<HTMLButtonElement>) {
+    e.preventDefault(); setDragActive(false);
+    const selected = e.dataTransfer.files?.[0]; if (selected) handleFile(selected);
+  }
   function setSize(index: number, key: keyof SizeDraft, value: string) {
     setSizes(current => current.map((s, i) => i === index ? { ...s, [key]: value } : s));
   }
@@ -100,11 +106,11 @@ export default function CreatePage() {
       <section className="editor-layout">
         <div className="panel upload-panel">
           <div className="section-title"><span>01</span><div><h2>选择照片</h2><p>支持 JPG、PNG 等常见图片格式</p></div></div>
-          <button className="upload-zone" onClick={() => fileInputRef.current?.click()}>
-            {preview ? <img src={preview} alt="照片预览" /> : <><span className="upload-icon">＋</span><strong>点击选择照片</strong><small>提交时会自动压缩到 2 MB 以内</small></>}
+          <button className={`upload-zone ${dragActive ? "drag-active" : ""} ${preview ? "has-preview" : ""}`} onClick={() => fileInputRef.current?.click()} onDragOver={e => { e.preventDefault(); setDragActive(true); }} onDragLeave={() => setDragActive(false)} onDrop={onDrop}>
+            {preview ? <><img src={preview} alt="照片预览" /><span className="upload-change">更换照片</span></> : <><span className="upload-icon">↑</span><strong>点击或拖入照片</strong><small>支持 JPG、PNG · 自动压缩至 2 MB 内</small></>}
           </button>
           <input ref={fileInputRef} type="file" accept="image/*" hidden onChange={onFileChange} />
-          {file && <div className="file-meta"><span>{file.name}</span><span>{formatBytes(file.size)}</span></div>}
+          {file && <div className="file-meta"><span><i>✓</i>{file.name}</span><strong>{formatBytes(file.size)}</strong></div>}
         </div>
         <div className="panel size-panel">
           <div className="section-title"><span>02</span><div><h2>选择照片尺寸</h2><p>可以直接输入任意 100～3000 px 的整数</p></div></div>
