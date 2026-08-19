@@ -3,6 +3,9 @@ import { sql } from "@/lib/db";
 import { createWorkerCredential, credentialExpiryDate, hashWorkerCredential } from "@/lib/worker-auth";
 
 export const runtime = "nodejs";
+// The wake request intentionally remains open for the complete worker run.
+// Give multi-image CPU runs enough time on Vercel plans that support it.
+export const maxDuration = 300;
 
 const WORKER_STALE_SECONDS = 120;
 
@@ -132,10 +135,11 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error(error);
-    if (workerRunId) {
-      await sql`UPDATE photo_worker_runs SET status = 'failed', finished_at = NOW(), error = ${error instanceof Error ? error.message : "启动处理失败"} WHERE id = ${workerRunId} AND status IN ('starting','running')`.catch(() => undefined);
-      await sql`UPDATE photo_worker_state SET status = 'idle', active_run_id = NULL, updated_at = NOW() WHERE id = 1 AND active_run_id = ${workerRunId}`.catch(() => undefined);
-    }
+    // A fetch timeout/connection close is indeterminate: the request may have
+    // reached the backend and inference may still be running. Do not revoke its
+    // credential here. Heartbeats keep a live run fresh; status reconciliation
+    // safely marks it failed after WORKER_STALE_SECONDS if it never started or
+    // later disappeared.
     return NextResponse.json({ error: error instanceof Error ? error.message : "启动处理失败" }, { status: 500 });
   }
 }
