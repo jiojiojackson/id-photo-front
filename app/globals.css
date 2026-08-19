@@ -64,6 +64,9 @@ h1 { margin: 0; font-size: clamp(32px, 5vw, 48px); line-height: 1.05; letter-spa
 .stat-card span { display: block; color: #9ca3af; font-size: 12px; }
 .stat-card strong { display: block; margin-top: 6px; font-size: 27px; letter-spacing: -.04em; }
 .queue-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.queue-head-actions { display: flex; align-items: center; gap: 8px; }
+.danger-button { border: 1px solid #fecaca; background: #fff; color: #dc2626; border-radius: 11px; padding: 10px 14px; font-size: 13px; font-weight: 700; cursor: pointer; }
+.danger-button:hover:not(:disabled) { background: #fef2f2; }.danger-button:disabled { opacity: .45; cursor: not-allowed; }
 .worker-strip { display: flex; align-items: center; gap: 8px; margin: 20px 0 4px; padding: 10px 12px; border-radius: 11px; background: #f7f8fa; color: #6b7280; font-size: 12px; }
 .worker-note { margin-left: auto; color: #a1a1aa; }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #9ca3af; }
@@ -88,7 +91,10 @@ h1 { margin: 0; font-size: clamp(32px, 5vw, 48px); line-height: 1.05; letter-spa
 .editor-head { display: flex; justify-content: space-between; align-items: center; }
 .success-pill { border-radius: 999px; background: #dcfce7; color: #15803d; padding: 6px 9px; font-size: 10px; font-weight: 800; }
 .canvas-stage { min-height: 480px; margin-top: 18px; display: grid; place-items: center; padding: 28px; border-radius: 16px; background: repeating-conic-gradient(#eceff2 0 25%, #fff 0 50%) 50% / 22px 22px; overflow: auto; }
-.canvas-stage canvas { max-width: 100%; max-height: 580px; width: auto; height: auto; box-shadow: 0 12px 30px rgba(0,0,0,.16); }
+.canvas-stage canvas { max-width: 100%; max-height: 580px; width: auto; height: auto; box-shadow: 0 12px 30px rgba(0,0,0,.16); opacity: 0; transition: opacity .28s ease; }
+.canvas-stage { position: relative; }
+.canvas-stage.ready canvas { opacity: 1; }
+.preview-loading { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 12px; color: #6b7280; font-size: 12px; }
 .color-tools { margin-top: 20px; padding-top: 18px; border-top: 1px solid #edf0f4; }
 .tool-title { display: flex; justify-content: space-between; font-size: 13px; }.tool-title span { color: #9ca3af; font-family: monospace; }
 .color-grid { display: flex; flex-wrap: wrap; gap: 11px; margin-top: 13px; }
