@@ -10,10 +10,13 @@ export async function POST(request: NextRequest) {
   let workerRunId: string | null = null;
 
   try {
-    const lightningUrl = process.env.LIGHTNING_API_URL;
-    const lightningKey = process.env.LIGHTNING_API_KEY;
-    if (!lightningUrl || !lightningKey) {
-      return NextResponse.json({ error: "LIGHTNING_API_URL 或 LIGHTNING_API_KEY 未配置" }, { status: 500 });
+    const pangolinApiUrl = process.env.PANGOLIN_API_URL;
+    const pangolinTokenId = process.env.PANGOLIN_ACCESS_TOKEN_ID;
+    const pangolinToken = process.env.PANGOLIN_ACCESS_TOKEN;
+    if (!pangolinApiUrl || !pangolinTokenId || !pangolinToken) {
+      return NextResponse.json({
+        error: "PANGOLIN_API_URL、PANGOLIN_ACCESS_TOKEN_ID 或 PANGOLIN_ACCESS_TOKEN 未配置",
+      }, { status: 500 });
     }
 
     const credential = createWorkerCredential();
@@ -83,11 +86,12 @@ export async function POST(request: NextRequest) {
 
     const vercelOrigin = request.nextUrl.origin;
     const bridgeUrl = `${vercelOrigin}/api/worker`;
-    const wakeResponse = await fetch(buildLightningProcessQueueUrl(lightningUrl), {
+    const wakeResponse = await fetch(buildProcessQueueUrl(pangolinApiUrl), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${lightningKey}`,
+        "P-Access-Token-Id": pangolinTokenId,
+        "P-Access-Token": pangolinToken,
       },
       body: JSON.stringify({
         worker_run_id: workerRunId,
@@ -102,7 +106,7 @@ export async function POST(request: NextRequest) {
     if (!wakeResponse.ok) {
       const responseBody = await wakeResponse.text().catch(() => "");
       const errorMessage = [
-        `Lightning wake failed: HTTP ${wakeResponse.status}`,
+        `Pangolin API request failed: HTTP ${wakeResponse.status}`,
         wakeResponse.statusText ? `(${wakeResponse.statusText})` : "",
         responseBody ? `body=${responseBody.slice(0, 1000)}` : "",
       ].filter(Boolean).join(" ");
@@ -111,7 +115,7 @@ export async function POST(request: NextRequest) {
         await tx`UPDATE photo_worker_runs SET status = 'failed', finished_at = NOW(), error = ${errorMessage} WHERE id = ${workerRunId}`;
         await tx`UPDATE photo_worker_state SET status = 'idle', active_run_id = NULL, updated_at = NOW() WHERE id = 1 AND active_run_id = ${workerRunId}`;
       });
-      return NextResponse.json({ error: `启动 Lightning 失败 (${wakeResponse.status})` }, { status: 502 });
+      return NextResponse.json({ error: `启动处理服务失败 (${wakeResponse.status})` }, { status: 502 });
     }
 
     await sql.begin(async (tx) => {
@@ -136,7 +140,7 @@ export async function POST(request: NextRequest) {
   }
 }
 
-function buildLightningProcessQueueUrl(baseUrl: string): string {
+function buildProcessQueueUrl(baseUrl: string): string {
   const url = new URL(baseUrl);
   if (!url.pathname.endsWith("/process-queue")) {
     url.pathname = `${url.pathname.replace(/\/$/, "")}/process-queue`;
