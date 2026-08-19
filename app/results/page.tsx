@@ -16,6 +16,45 @@ function hexToRgb(hex: string) {
   return { r: parseInt(value.slice(0, 2), 16), g: parseInt(value.slice(2, 4), 16), b: parseInt(value.slice(4, 6), 16) };
 }
 
+function colorDistance(data: Uint8ClampedArray, offset: number, color: { r: number; g: number; b: number }) {
+  const dr = data[offset] - color.r, dg = data[offset + 1] - color.g, db = data[offset + 2] - color.b;
+  return Math.sqrt(dr * dr + dg * dg + db * db);
+}
+
+function estimateBackground(data: Uint8ClampedArray, width: number, height: number) {
+  const samples: Array<{ r: number; g: number; b: number }> = [];
+  const stepX = Math.max(1, Math.floor(width / 40)), stepY = Math.max(1, Math.floor(height / 40));
+  const add = (x: number, y: number) => {
+    const offset = (y * width + x) * 4;
+    if (data[offset + 3] > 245) samples.push({ r: data[offset], g: data[offset + 1], b: data[offset + 2] });
+  };
+  for (let x = 0; x < width; x += stepX) { add(x, 0); add(x, height - 1); }
+  for (let y = 0; y < height; y += stepY) { add(0, y); add(width - 1, y); }
+  if (!samples.length) return { r: 255, g: 255, b: 255 };
+  const median = (channel: "r" | "g" | "b") => samples.map(sample => sample[channel]).sort((a, b) => a - b)[Math.floor(samples.length / 2)];
+  return { r: median("r"), g: median("g"), b: median("b") };
+}
+
+function buildBackgroundMask(data: Uint8ClampedArray, width: number, height: number, background: { r: number; g: number; b: number }) {
+  const mask = new Uint8Array(width * height), queue = new Int32Array(width * height);
+  let head = 0, tail = 0;
+  const tolerance = 48;
+  const enqueue = (index: number) => {
+    if (mask[index] || colorDistance(data, index * 4, background) > tolerance) return;
+    mask[index] = 1; queue[tail++] = index;
+  };
+  for (let x = 0; x < width; x++) { enqueue(x); enqueue((height - 1) * width + x); }
+  for (let y = 1; y < height - 1; y++) { enqueue(y * width); enqueue(y * width + width - 1); }
+  while (head < tail) {
+    const index = queue[head++], x = index % width;
+    if (x > 0) enqueue(index - 1);
+    if (x + 1 < width) enqueue(index + 1);
+    if (index >= width) enqueue(index - width);
+    if (index + width < mask.length) enqueue(index + width);
+  }
+  return mask;
+}
+
 export default function ResultsPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const originalPixelsRef = useRef<ImageData | null>(null);
@@ -83,18 +122,22 @@ export default function ResultsPage() {
     if (!ctx) return;
     const original = originalPixelsRef.current;
     const pixels = new ImageData(new Uint8ClampedArray(original.data), original.width, original.height);
-    const data = pixels.data;
-    const offsets = [0, (original.width - 1) * 4, (original.height - 1) * original.width * 4, (original.width * original.height - 1) * 4];
-    const samples = offsets.filter(offset => data[offset + 3] > 0);
-    const bgSamples = samples.length ? samples : [0];
-    const bg = bgSamples.reduce((sum, offset) => ({ r: sum.r + data[offset], g: sum.g + data[offset + 1], b: sum.b + data[offset + 2] }), { r: 0, g: 0, b: 0 });
-    bg.r /= bgSamples.length; bg.g /= bgSamples.length; bg.b /= bgSamples.length;
-    const target = hexToRgb(nextColor), tolerance = 90;
+    const data = pixels.data, target = hexToRgb(nextColor);
+    let transparentPixels = 0;
+    for (let i = 3; i < data.length; i += 4) if (data[i] < 250) transparentPixels++;
+    const hasTransparentBackground = transparentPixels > original.width * original.height * 0.01;
+    const background = estimateBackground(data, original.width, original.height);
+    const mask = hasTransparentBackground ? null : buildBackgroundMask(data, original.width, original.height, background);
     for (let i = 0; i < data.length; i += 4) {
-      const dr = data[i] - bg.r, dg = data[i + 1] - bg.g, db = data[i + 2] - bg.b;
-      const distance = Math.sqrt(dr * dr + dg * dg + db * db);
-      if (distance < tolerance) {
-        const originalWeight = Math.pow(distance / tolerance, 2);
+      if (hasTransparentBackground) {
+        const alpha = data[i + 3] / 255;
+        data[i] = Math.round(data[i] * alpha + target.r * (1 - alpha));
+        data[i + 1] = Math.round(data[i + 1] * alpha + target.g * (1 - alpha));
+        data[i + 2] = Math.round(data[i + 2] * alpha + target.b * (1 - alpha));
+        data[i + 3] = 255;
+      } else if (mask?.[i / 4]) {
+        const distance = colorDistance(data, i, background);
+        const originalWeight = Math.pow(Math.min(distance / 48, 1), 2);
         data[i] = Math.round(target.r * (1 - originalWeight) + data[i] * originalWeight);
         data[i + 1] = Math.round(target.g * (1 - originalWeight) + data[i + 1] * originalWeight);
         data[i + 2] = Math.round(target.b * (1 - originalWeight) + data[i + 2] * originalWeight);
@@ -129,7 +172,7 @@ export default function ResultsPage() {
             <div className="tool-title"><strong>选择背景色</strong><span>{color.toUpperCase()}</span></div>
             <div className="color-grid">{COLORS.map(([name, value]) => <button key={value} title={name} aria-label={name} className={color === value ? "color-swatch active" : "color-swatch"} style={{ background: value }} onClick={() => applyColor(value)} disabled={previewLoading} />)}</div>
             <label className="custom-color"><span>自定义颜色</span><input type="color" value={color} onChange={e => applyColor(e.target.value)} disabled={previewLoading} /><code>{color.toUpperCase()}</code></label>
-            {editing && <p className="edit-note">已根据原背景自动替换颜色。人物边缘会保留平滑过渡。</p>}
+            {editing && <p className="edit-note">只替换与图片边缘连通的背景区域，人物区域保持不变。</p>}
           </div>
           <button className="download-action" onClick={download}>↓ 下载当前图片</button>
         </>}
