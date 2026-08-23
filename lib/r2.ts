@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 const encoder = new TextEncoder();
 
 function required(name: string) {
@@ -34,6 +36,13 @@ function encode(value: string) {
   return encodeURIComponent(value).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
+function canonicalQuery(params: Record<string, string>) {
+  return Object.entries(params)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${encode(key)}=${encode(value)}`)
+    .join("&");
+}
+
 function getConfig() {
   const accountId = required("R2_ACCOUNT_ID");
   return {
@@ -49,6 +58,108 @@ async function signingKey(secretAccessKey: string, dateStamp: string, region = "
   const kRegion = await hmac(kDate, region);
   const kService = await hmac(kRegion, service);
   return hmac(kService, "aws4_request");
+}
+
+async function signedBucketRequest(
+  method: "GET" | "POST",
+  query: Record<string, string>,
+  body?: string,
+  additionalHeaders: Record<string, string> = {},
+) {
+  const { accessKeyId, secretAccessKey, bucket, endpoint } = getConfig();
+  const region = "auto";
+  const service = "s3";
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
+  const dateStamp = amzDate.slice(0, 8);
+  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
+  const credential = `${accessKeyId}/${credentialScope}`;
+  const canonicalUri = `/${encode(bucket)}`;
+  const host = new URL(endpoint).host;
+  const payloadHash = await sha256Text(body || "");
+  const headers: Record<string, string> = {
+    ...additionalHeaders,
+    host,
+    "x-amz-content-sha256": payloadHash,
+    "x-amz-date": amzDate,
+  };
+  const canonicalHeaderEntries = Object.entries(headers)
+    .map(([name, value]) => [name.toLowerCase(), value.trim().replace(/\s+/g, " ")] as const)
+    .sort(([a], [b]) => a.localeCompare(b));
+  const canonicalHeaders = canonicalHeaderEntries.map(([name, value]) => `${name}:${value}\n`).join("");
+  const signedHeaders = canonicalHeaderEntries.map(([name]) => name).join(";");
+  const queryString = canonicalQuery(query);
+  const canonicalRequest = [method, canonicalUri, queryString, canonicalHeaders, signedHeaders, payloadHash].join("\n");
+  const stringToSign = ["AWS4-HMAC-SHA256", amzDate, credentialScope, await sha256Text(canonicalRequest)].join("\n");
+  const signature = hex(await hmac(await signingKey(secretAccessKey, dateStamp, region, service), stringToSign));
+
+  return fetch(`${endpoint}${canonicalUri}?${queryString}`, {
+    method,
+    headers: {
+      ...headers,
+      Authorization: `AWS4-HMAC-SHA256 Credential=${credential}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
+    },
+    body,
+    cache: "no-store",
+  });
+}
+
+function decodeListedKey(value: string) {
+  const xmlDecoded = value
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)))
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number.parseInt(code, 10)))
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+  return decodeURIComponent(xmlDecoded);
+}
+
+async function listObjectKeys() {
+  const response = await signedBucketRequest("GET", {
+    "encoding-type": "url",
+    "list-type": "2",
+    "max-keys": "1000",
+  });
+  const xml = await response.text();
+  if (!response.ok) throw new Error(`R2 list failed: ${response.status}`);
+
+  return [...xml.matchAll(/<Key>([\s\S]*?)<\/Key>/g)].map((match) => decodeListedKey(match[1]));
+}
+
+function escapeXml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+async function deleteObjects(keys: string[]) {
+  const body = `<?xml version="1.0" encoding="UTF-8"?><Delete>${keys
+    .map((key) => `<Object><Key>${escapeXml(key)}</Key></Object>`)
+    .join("")}<Quiet>true</Quiet></Delete>`;
+  const response = await signedBucketRequest("POST", { delete: "" }, body, {
+    "content-md5": createHash("md5").update(body).digest("base64"),
+    "content-type": "application/xml",
+  });
+  const xml = await response.text();
+  if (!response.ok) throw new Error(`R2 delete failed: ${response.status}`);
+  if (/<Error>/.test(xml)) throw new Error("R2 delete returned one or more object errors");
+}
+
+/** Removes every object currently stored in the configured R2 bucket. */
+export async function emptyBucket() {
+  let deleted = 0;
+
+  while (true) {
+    const keys = await listObjectKeys();
+    if (keys.length === 0) return deleted;
+    await deleteObjects(keys);
+    deleted += keys.length;
+  }
 }
 
 export async function createPresignedUrl(method: "GET" | "PUT", key: string, expiresInSeconds = 1800): Promise<string> {
@@ -69,12 +180,12 @@ export async function createPresignedUrl(method: "GET" | "PUT", key: string, exp
     "X-Amz-Expires": String(Math.max(1, Math.min(expiresInSeconds, 604800))),
     "X-Amz-SignedHeaders": "host",
   };
-  const canonicalQuery = Object.entries(query).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${encode(k)}=${encode(v)}`).join("&");
+  const canonicalQueryString = canonicalQuery(query);
   const canonicalHeaders = `host:${host}\n`;
-  const canonicalRequest = [method, canonicalUri, canonicalQuery, canonicalHeaders, "host", "UNSIGNED-PAYLOAD"].join("\n");
+  const canonicalRequest = [method, canonicalUri, canonicalQueryString, canonicalHeaders, "host", "UNSIGNED-PAYLOAD"].join("\n");
   const stringToSign = ["AWS4-HMAC-SHA256", amzDate, credentialScope, await sha256Text(canonicalRequest)].join("\n");
   const signature = hex(await hmac(await signingKey(secretAccessKey, dateStamp, region, service), stringToSign));
-  return `${endpoint}${canonicalUri}?${canonicalQuery}&X-Amz-Signature=${signature}`;
+  return `${endpoint}${canonicalUri}?${canonicalQueryString}&X-Amz-Signature=${signature}`;
 }
 
 /** Direct SigV4 upload. Submission never creates a presigned URL. */
