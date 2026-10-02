@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
-import { createPresignedUrl } from "@/lib/r2";
+import { getBackendHealth } from "@/lib/backend";
 
 export const runtime = "nodejs";
 
@@ -66,7 +66,7 @@ export async function GET() {
   try {
     await reconcileStaleWorker();
 
-    const [counts, state, jobs] = await Promise.all([
+    const [counts, state, jobs, backend] = await Promise.all([
       sql`
         SELECT
           COUNT(*) FILTER (WHERE status = 'queued')::int AS queued,
@@ -84,17 +84,19 @@ export async function GET() {
         ORDER BY created_at DESC
         LIMIT 30
       `,
+      getBackendHealth(),
     ]);
 
-    const resultJobs = await Promise.all(jobs.map(async (job) => ({
+    const resultJobs = jobs.map((job) => ({
       ...job,
-      resultUrl: job.status === "completed" ? await createPresignedUrl("GET", job.output_key, 30 * 60) : null,
-    })));
+      resultUrl: job.status === "completed" ? `/api/jobs/image?jobId=${encodeURIComponent(String(job.id))}` : null,
+    }));
 
     return NextResponse.json({
       counts: counts[0],
       worker: state[0] || { status: "idle" },
       jobs: resultJobs,
+      backend,
     });
   } catch (error) {
     console.error(error);

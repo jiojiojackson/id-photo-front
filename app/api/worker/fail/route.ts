@@ -13,15 +13,16 @@ export async function POST(request: Request) {
   const body = await request.json().catch(() => ({}));
   const jobId = String(body.jobId || "");
   if (!jobId) return NextResponse.json({ error: "jobId is required" }, { status: 400 });
-  const errorMessage = String(body.error || "Lightning processing failed").slice(0, 2000);
+  const errorMessage = String(body.error || "照片处理失败").slice(0, 2000);
+  const retryable = body.retryable !== false;
   const runId = String(worker.id);
 
   const rows = await sql.begin(async (tx) => {
     const failed = await tx`
       UPDATE photo_jobs
-      SET status = CASE WHEN attempt_count >= ${MAX_ATTEMPTS} THEN 'failed' ELSE 'queued' END,
+      SET status = CASE WHEN NOT ${retryable} OR attempt_count >= ${MAX_ATTEMPTS} THEN 'failed' ELSE 'queued' END,
           error = ${errorMessage},
-          completed_at = CASE WHEN attempt_count >= ${MAX_ATTEMPTS} THEN NOW() ELSE NULL END,
+          completed_at = CASE WHEN NOT ${retryable} OR attempt_count >= ${MAX_ATTEMPTS} THEN NOW() ELSE NULL END,
           worker_run_id = NULL, claimed_at = NULL, lease_expires_at = NULL,
           input_url = NULL, output_url = NULL, url_expires_at = NULL
       WHERE id = ${jobId}

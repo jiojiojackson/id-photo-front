@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import AppShell from "@/components/AppShell";
 
@@ -17,19 +17,33 @@ export default function JobsPage() {
   const [confirmClear, setConfirmClear] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const refreshing = useRef(false);
+  const [backendError, setBackendError] = useState("");
 
-  async function refreshStatus() {
-    setLoading(true); setError("");
+  const refreshStatus = useCallback(async (quiet = false) => {
+    if (refreshing.current) return;
+    refreshing.current = true;
+    if (!quiet) { setLoading(true); setError(""); }
     try {
       const response = await fetch("/api/jobs/status", { cache: "no-store" });
       const data = await response.json().catch(() => null);
       if (!response.ok) throw new Error(data?.error || `刷新失败 (${response.status})`);
       setCounts(data.counts); setJobs(data.jobs || []); setWorkerStatus(data.worker?.status || "idle");
+      setBackendError(data.backend?.error || "");
     } catch (err) { setError(err instanceof Error ? err.message : "刷新任务状态失败"); }
-    finally { setLoading(false); }
-  }
+    finally { refreshing.current = false; if (!quiet) setLoading(false); }
+  }, []);
 
-  useEffect(() => { refreshStatus(); }, []);
+  useEffect(() => { void refreshStatus(); }, [refreshStatus]);
+  useEffect(() => {
+    const active = workerStatus !== "idle" || counts.processing > 0;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refreshStatus(true);
+    }, active ? 3000 : 15000);
+    const onVisible = () => { if (document.visibilityState === "visible") void refreshStatus(true); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
+  }, [workerStatus, counts.processing, refreshStatus]);
 
   async function startProcessing() {
     if (!counts.queued || workerStatus !== "idle") return;
@@ -59,13 +73,14 @@ export default function JobsPage() {
   const statusLabel = (status: string) => status === "queued" ? "等待中" : status === "processing" ? "处理中" : status === "completed" ? "已完成" : "处理失败";
 
   return <AppShell>
-    <div className="hero compact-hero"><div><div className="eyebrow">STEP 02 · QUEUE</div><h1>任务队列</h1><p>提交只是排队，只有点击开始处理才会调用 Pangolin 后面的处理服务。</p></div><Link className="secondary-action" href="/create">＋ 新建任务</Link></div>
+    <div className="hero compact-hero"><div><div className="eyebrow">STEP 02 · QUEUE</div><h1>任务队列</h1><p>提交照片后点击开始处理，任务进度会自动更新。</p></div><Link className="secondary-action" href="/create">＋ 新建任务</Link></div>
     <section className="stats-grid">
       {[["queued","待处理"],["processing","处理中"],["completed","已完成"],["failed","失败"]].map(([key,label]) => <div className="stat-card" key={key}><span>{label}</span><strong>{counts[key as keyof Counts]}</strong></div>)}
     </section>
     <section className="panel queue-panel">
-      <div className="queue-head"><div><h2>当前任务</h2><p>{estimate}</p></div><div className="queue-head-actions"><button className="danger-button" onClick={() => setConfirmClear(true)} disabled={clearing}><span>⌫</span> 清空队列与历史</button><button className="outline-button" onClick={refreshStatus} disabled={loading}>{loading ? "刷新中…" : "↻ 刷新状态"}</button></div></div>
-      <div className="worker-strip"><span className={`status-dot ${workerStatus}`}></span><span>Worker：{workerStatus === "running" ? "正在处理" : workerStatus === "starting" ? "正在启动" : "空闲"}</span><span className="worker-note">状态不会自动轮询</span></div>
+      <div className="queue-head"><div><h2>当前任务</h2><p>{estimate}</p></div><div className="queue-head-actions"><button className="danger-button" onClick={() => setConfirmClear(true)} disabled={clearing || workerStatus !== "idle" || counts.processing > 0}><span>⌫</span> 清空队列与历史</button><button className="outline-button" onClick={() => void refreshStatus()} disabled={loading}>{loading ? "刷新中…" : "↻ 刷新状态"}</button></div></div>
+      <div className="worker-strip"><span className={`status-dot ${workerStatus}`}></span><span>Worker：{workerStatus === "running" ? "正在处理" : workerStatus === "starting" ? "正在启动" : "空闲"}</span><span className="worker-note">进度自动更新</span></div>
+      {backendError && <div className="error">{backendError}</div>}
       {jobs.length === 0 ? <div className="empty-state"><div className="empty-icon">◎</div><h3>还没有任务</h3><p>先创建一组尺寸，再回来启动处理。</p><Link className="primary-action inline" href="/create">开始制作</Link></div> : <div className="job-list">{jobs.map(job => <div className="job-row" key={job.id}><div className="job-size"><strong>{job.width} × {job.height}</strong><span>px</span></div><div className={`job-status ${job.status}`}>{statusLabel(job.status)}</div>{job.error && <span className="job-error">{job.error}</span>}{job.status === "completed" && <Link className="small-action" href={`/results?job=${encodeURIComponent(job.id)}`}>调整结果 →</Link>}</div>)}</div>}
       {notice && <div className="notice" role="status"><span>✓</span>{notice}</div>}
       {error && <div className="error">{error}</div>}

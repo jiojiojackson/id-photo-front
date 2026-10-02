@@ -2,6 +2,29 @@ import { createHash } from "node:crypto";
 
 const encoder = new TextEncoder();
 
+const STORAGE_TIMEOUT_MS = 30_000;
+const MAX_DELETE_BATCHES = 100;
+
+export class R2Error extends Error {
+  constructor(operation: string, public status: number, public code: string, public requestId: string | null) {
+    super(`R2 ${operation} failed: HTTP ${status} (${code})`);
+    this.name = "R2Error";
+  }
+}
+
+async function readStorageResponse(response: Response, operation: string, root?: string) {
+  const body = await response.text();
+  const code = body.match(/<Code>([^<]+)<\/Code>/)?.[1];
+  const requestId = response.headers.get("cf-ray") || response.headers.get("x-amz-request-id");
+  if (!response.ok || code || (root && !new RegExp(`<${root}(?:\\s|>)`).test(body))) {
+    const error = new R2Error(operation, response.status, code || (response.ok ? "InvalidResponse" : "HTTPError"), requestId);
+    console.error("[R2]", { operation, status: error.status, code: error.code, requestId });
+    throw error;
+  }
+  console.info("[R2]", { operation, status: response.status, requestId });
+  return body;
+}
+
 function required(name: string) {
   const value = process.env[name];
   if (!value) throw new Error(`${name} is not configured`);
@@ -101,6 +124,7 @@ async function signedBucketRequest(
     },
     body,
     cache: "no-store",
+    signal: AbortSignal.timeout(STORAGE_TIMEOUT_MS),
   });
 }
 
@@ -122,8 +146,7 @@ async function listObjectKeys() {
     "list-type": "2",
     "max-keys": "1000",
   });
-  const xml = await response.text();
-  if (!response.ok) throw new Error(`R2 list failed: ${response.status}`);
+  const xml = await readStorageResponse(response, "list", "ListBucketResult");
 
   return [...xml.matchAll(/<Key>([\s\S]*?)<\/Key>/g)].map((match) => decodeListedKey(match[1]));
 }
@@ -145,21 +168,25 @@ async function deleteObjects(keys: string[]) {
     "content-md5": createHash("md5").update(body).digest("base64"),
     "content-type": "application/xml",
   });
-  const xml = await response.text();
-  if (!response.ok) throw new Error(`R2 delete failed: ${response.status}`);
-  if (/<Error>/.test(xml)) throw new Error("R2 delete returned one or more object errors");
+  await readStorageResponse(response, "delete", "DeleteResult");
 }
 
 /** Removes every object currently stored in the configured R2 bucket. */
 export async function emptyBucket() {
   let deleted = 0;
+  let previousPage = "";
 
-  while (true) {
+  for (let batch = 0; batch <= MAX_DELETE_BATCHES; batch++) {
     const keys = await listObjectKeys();
     if (keys.length === 0) return deleted;
+    if (batch === MAX_DELETE_BATCHES) throw new Error("R2 cleanup batch limit reached; retry to continue");
+    const page = JSON.stringify(keys);
+    if (page === previousPage) throw new Error("R2 cleanup made no progress; stopped repeated delete requests");
+    previousPage = page;
     await deleteObjects(keys);
     deleted += keys.length;
   }
+  return deleted;
 }
 
 export async function createPresignedUrl(method: "GET" | "PUT", key: string, expiresInSeconds = 1800): Promise<string> {
@@ -220,8 +247,9 @@ export async function putObject(key: string, body: ArrayBuffer | Uint8Array, con
     },
     body: bodyBuffer,
     cache: "no-store",
+    signal: AbortSignal.timeout(STORAGE_TIMEOUT_MS),
   });
-  if (!response.ok) throw new Error(`R2 upload failed: ${response.status}`);
+  await readStorageResponse(response, "upload");
 }
 
 export function inputKey(requestId: string) { return `input/${requestId}/original.jpg`; }

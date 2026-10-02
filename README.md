@@ -10,7 +10,8 @@ Next.js front end for the asynchronous ID-photo generation pipeline.
 4. The user clicks `开始处理（N 个任务）`.
 5. Vercel calls the backend through Pangolin and authenticates with Pangolin access-token headers.
 6. The backend polls the Queue one message at a time. Only when it asks for a job does Vercel generate short-lived R2 presigned GET/PUT URLs.
-7. The backend processes jobs strictly sequentially, updates job status through the worker API, and calls `/api/worker/finish` when the Queue is empty.
+7. The backend acknowledges startup immediately, processes jobs strictly sequentially, updates job status through the worker API, and calls `/api/worker/finish` when the Queue is empty.
+8. The UI automatically refreshes progress and backend health. Status requests do not access R2. Results retain HD resolution and the chosen aspect ratio.
 
 ## Neon
 
@@ -62,3 +63,5 @@ The two Pangolin tokens must remain server-side Vercel environment variables and
 5. After deployment, sign in, submit one photo, click Start, and verify that the job reaches `completed`.
 
 For CLI deployment, run `vercel`, add secrets with `vercel env add NAME production`, then run `vercel --prod`.
+
+Run `npm test` for bounded R2 cleanup tests. See [R2_AUDIT.md](R2_AUDIT.md) for storage request behavior and diagnostics.

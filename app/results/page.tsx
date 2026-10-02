@@ -59,7 +59,6 @@ export default function ResultsPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const originalPixelsRef = useRef<ImageData | null>(null);
   const loadVersionRef = useRef(0);
-  const [selectedId, setSelectedId] = useState("");
   const [jobs, setJobs] = useState<Job[]>([]);
   const [selected, setSelected] = useState<Job | null>(null);
   const [color, setColor] = useState("#ffffff");
@@ -70,24 +69,24 @@ export default function ResultsPage() {
   const [previewLoading, setPreviewLoading] = useState(false);
 
   useEffect(() => {
-    setSelectedId(new URLSearchParams(window.location.search).get("job") || "");
-  }, []);
-
-  useEffect(() => {
+    let cancelled = false;
+    const initialId = new URLSearchParams(window.location.search).get("job") || "";
     async function load() {
       setLoading(true); setError("");
       try {
         const response = await fetch("/api/jobs/status", { cache: "no-store" });
         const data = await response.json().catch(() => null);
+        if (cancelled) return;
         if (!response.ok) throw new Error(data?.error || `读取结果失败 (${response.status})`);
         const completed = (data.jobs || []).filter((job: Job) => job.status === "completed" && job.resultUrl);
         setJobs(completed);
-        setSelected(completed.find((job: Job) => job.id === selectedId) || completed[0] || null);
+        setSelected(completed.find((job: Job) => job.id === initialId) || completed[0] || null);
       } catch (err) { setError(err instanceof Error ? err.message : "读取结果失败"); }
       finally { setLoading(false); }
     }
     load();
-  }, [selectedId]);
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (!selected) return;
@@ -174,7 +173,7 @@ export default function ResultsPage() {
             <label className="custom-color"><span>自定义颜色</span><input type="color" value={color} onChange={e => applyColor(e.target.value)} disabled={previewLoading} /><code>{color.toUpperCase()}</code></label>
             {editing && <p className="edit-note">只替换与图片边缘连通的背景区域，人物区域保持不变。</p>}
           </div>
-          <button className="download-action" onClick={download}>↓ 下载当前图片</button>
+          <button className="download-action" onClick={download} disabled={previewLoading}>↓ 下载当前图片</button>
         </>}
       </div>
     </section>}

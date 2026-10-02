@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { createWorkerCredential, credentialExpiryDate, hashWorkerCredential } from "@/lib/worker-auth";
+import { backendConfig } from "@/lib/backend";
 
 export const runtime = "nodejs";
-// The wake request intentionally remains open for the complete worker run.
-// Give multi-image CPU runs enough time on Vercel plans that support it.
-export const maxDuration = 300;
+// The persistent backend acknowledges the run before starting inference.
+export const maxDuration = 60;
 
 const WORKER_STALE_SECONDS = 120;
 
@@ -13,14 +13,7 @@ export async function POST(request: NextRequest) {
   let workerRunId: string | null = null;
 
   try {
-    const pangolinApiUrl = process.env.PANGOLIN_API_URL;
-    const pangolinTokenId = process.env.PANGOLIN_ACCESS_TOKEN_ID;
-    const pangolinToken = process.env.PANGOLIN_ACCESS_TOKEN;
-    if (!pangolinApiUrl || !pangolinTokenId || !pangolinToken) {
-      return NextResponse.json({
-        error: "PANGOLIN_API_URL、PANGOLIN_ACCESS_TOKEN_ID 或 PANGOLIN_ACCESS_TOKEN 未配置",
-      }, { status: 500 });
-    }
+    const backend = backendConfig();
 
     const credential = createWorkerCredential();
     const credentialHash = await hashWorkerCredential(credential);
@@ -89,12 +82,12 @@ export async function POST(request: NextRequest) {
 
     const vercelOrigin = request.nextUrl.origin;
     const bridgeUrl = `${vercelOrigin}/api/worker`;
-    const wakeResponse = await fetch(buildProcessQueueUrl(pangolinApiUrl), {
+    backend.url.pathname += "/process-queue";
+    const wakeResponse = await fetch(backend.url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "P-Access-Token-Id": pangolinTokenId,
-        "P-Access-Token": pangolinToken,
+        ...backend.headers,
       },
       body: JSON.stringify({
         worker_run_id: workerRunId,
@@ -104,15 +97,13 @@ export async function POST(request: NextRequest) {
         worker_credential_expires_at: expiresAt.toISOString(),
       }),
       cache: "no-store",
+      redirect: "manual",
+      signal: AbortSignal.timeout(20_000),
     });
 
-    if (!wakeResponse.ok) {
-      const responseBody = await wakeResponse.text().catch(() => "");
-      const errorMessage = [
-        `Pangolin API request failed: HTTP ${wakeResponse.status}`,
-        wakeResponse.statusText ? `(${wakeResponse.statusText})` : "",
-        responseBody ? `body=${responseBody.slice(0, 1000)}` : "",
-      ].filter(Boolean).join(" ");
+    const acknowledgement = await wakeResponse.json().catch(() => null);
+    if (!wakeResponse.ok || !["started", "already_running"].includes(acknowledgement?.status) || acknowledgement?.worker_run_id !== workerRunId) {
+      const errorMessage = `处理服务未接受本次任务 (HTTP ${wakeResponse.status})`;
       console.error("[WorkerStart]", errorMessage);
       await sql.begin(async (tx) => {
         await tx`UPDATE photo_worker_runs SET status = 'failed', finished_at = NOW(), error = ${errorMessage} WHERE id = ${workerRunId}`;
@@ -142,14 +133,6 @@ export async function POST(request: NextRequest) {
     // later disappeared.
     return NextResponse.json({ error: error instanceof Error ? error.message : "启动处理失败" }, { status: 500 });
   }
-}
-
-function buildProcessQueueUrl(baseUrl: string): string {
-  const url = new URL(baseUrl);
-  if (!url.pathname.endsWith("/process-queue")) {
-    url.pathname = `${url.pathname.replace(/\/$/, "")}/process-queue`;
-  }
-  return url.toString();
 }
 
 async function estimateSeconds(jobCount: number) {

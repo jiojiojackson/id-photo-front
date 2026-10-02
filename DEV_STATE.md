@@ -1,4 +1,22 @@
-# DEV_STATE
+# Current deployment — 2026-10-02
+
+Frontend: Vercel (`id-photo-front.vercel.app`). Backend: persistent systemd service
+protected by Pangolin (`id-photo.prominem.pp.ua`). The obsolete `.tk` backend URL
+does not resolve. The backend acknowledges Start immediately; Vercel validates the
+accepted run ID and does not wait for inference to finish.
+
+The jobs page refreshes every three seconds during processing and every fifteen
+seconds when idle. Hidden tabs pause refresh. Status queries read Neon and backend
+health without issuing R2 requests. HD export and the requested aspect ratio are
+preserved. Conflicting backend runs return 409. Permanent storage and image errors
+end a job; temporary failures retry with bounded backoff. Cleanup requires an idle
+service, is serialized against upload/start, and has progress and batch limits.
+
+See [R2_AUDIT.md](R2_AUDIT.md) for confirmed risks and the historical warning's
+investigation limits. No schema migration is added. Validate with `npm test`,
+`npm run build`, and backend `python -m unittest discover -s tests`.
+
+# Archived development notes (superseded by the current deployment above)
 
 当前开发分支：`agent/queue-worker-bridge`
 

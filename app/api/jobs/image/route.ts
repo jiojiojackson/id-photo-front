@@ -11,8 +11,13 @@ export async function GET(request: NextRequest) {
     const rows = await sql`SELECT output_key, status FROM photo_jobs WHERE id = ${jobId} LIMIT 1`;
     if (!rows.length || rows[0].status !== "completed") return NextResponse.json({ error: "结果不存在" }, { status: 404 });
     const url = await createPresignedUrl("GET", String(rows[0].output_key), 300);
-    const response = await fetch(url, { cache: "no-store" });
-    if (!response.ok) return NextResponse.json({ error: "读取结果图片失败" }, { status: 502 });
+    const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(30_000) });
+    if (!response.ok) {
+      await response.body?.cancel();
+      console.error("[R2]", { operation: "read-result", status: response.status, requestId: response.headers.get("cf-ray") || response.headers.get("x-amz-request-id") });
+      return NextResponse.json({ error: "读取结果图片失败" }, { status: 502 });
+    }
+    console.info("[R2]", { operation: "read-result", status: response.status, requestId: response.headers.get("cf-ray") || response.headers.get("x-amz-request-id") });
     return new NextResponse(await response.arrayBuffer(), {
       headers: {
         "Content-Type": response.headers.get("content-type") || "image/png",
