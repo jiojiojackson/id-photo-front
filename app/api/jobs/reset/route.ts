@@ -20,16 +20,16 @@ export async function POST() {
       if (state[0]?.status !== "idle" || Number(active[0]?.count || 0) > 0) return null;
       // A storage failure rolls back the transaction and preserves the records.
       const deletedObjects = await emptyBucket();
-      await tx`TRUNCATE TABLE photo_jobs, photo_requests, photo_worker_runs RESTART IDENTITY CASCADE`;
       await tx`
-        INSERT INTO photo_worker_state (id, status, active_run_id, started_at, updated_at)
-        VALUES (1, 'idle', NULL, NULL, NOW())
-        ON CONFLICT (id) DO UPDATE SET
-          status = 'idle',
-          active_run_id = NULL,
-          started_at = NULL,
-          updated_at = NOW()
+        UPDATE photo_worker_state
+        SET status = 'idle', active_run_id = NULL, started_at = NULL, updated_at = NOW()
+        WHERE id = 1
       `;
+      // Keep the locked state row in place. TRUNCATE ... CASCADE removed it and
+      // required table locks that could deadlock concurrent Submit/Start calls.
+      await tx`DELETE FROM photo_jobs`;
+      await tx`DELETE FROM photo_requests`;
+      await tx`DELETE FROM photo_worker_runs`;
       return { deletedObjects };
     });
     if (!result) return NextResponse.json({ error: "任务正在处理，完成后才能清空照片" }, { status: 409 });

@@ -16,6 +16,7 @@ const WORKER_STALE_SECONDS = 120;
  */
 async function reconcileStaleWorker() {
   await sql.begin(async (tx) => {
+    await tx`SELECT id FROM photo_worker_state WHERE id = 1 FOR UPDATE`;
     const staleRuns = await tx`
       SELECT id
       FROM photo_worker_runs

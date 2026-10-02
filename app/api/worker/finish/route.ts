@@ -19,6 +19,9 @@ export async function POST(request: Request) {
   }
 
   await sql.begin(async (tx) => {
+    // Start and cleanup also lock state before touching runs. Keep the same lock
+    // order so finishing and starting a run cannot deadlock each other.
+    await tx`SELECT id FROM photo_worker_state WHERE id = 1 FOR UPDATE`;
     await tx`
       UPDATE photo_worker_runs
       SET status = 'completed', finished_at = NOW(), last_seen_at = NOW()

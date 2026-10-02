@@ -50,3 +50,22 @@ than issuing unlimited requests.
 To establish the historical warning's cause, obtain its exact text and compare
 R2 operation counts, error codes and source activity for that time window.
 The project's S3 storage credentials do not grant access to Cloudflare analytics.
+
+## Production verification
+
+Three new test jobs completed successfully in one serial run. The backend logged
+exactly three R2 downloads and three output uploads, with no failed jobs or retry
+backoff. The original upload occurred once in Vercel. No existing records were
+cleared during validation. Successful normal execution showed no request storm;
+this does not establish the cause of the historical Cloudflare warning.
+
+HD output was left unchanged as requested: the sample produced 600×846 for a
+295×413 selection, and 600×804 for 300×400 and 600×800 selections. The existing
+HD crop has approximately 0.5–0.7% aspect-ratio rounding/crop deviation; this
+update does not alter that export behavior.
+
+Additional reset tests verify that active workers never trigger storage cleanup,
+storage errors preserve database records, and successful cleanup preserves the
+locked state row. DELETE replaces TRUNCATE CASCADE to avoid dropping that row and
+contending for exclusive table locks. Start, Finish and stale reconciliation use
+the same state-before-run lock order.
