@@ -1,9 +1,12 @@
 import "./globals.css";
+import type { Viewport } from "next";
 
 export const metadata = {
-  title: "AI 证件照",
+  title: "证件照工坊 · Portrait Studio",
   description: "AI 在线证件照制作",
 };
+
+export const viewport: Viewport = { width: "device-width", initialScale: 1, viewportFit: "cover", themeColor: "#f5f5f7" };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (

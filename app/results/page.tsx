@@ -2,6 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import AppShell from "@/components/AppShell";
+import Link from "next/link";
+import Icon from "@/components/Icon";
+import Pagination, { emptyPagination, type PaginationData } from "@/components/Pagination";
 
 const COLORS = [
   ["纯白", "#ffffff"], ["浅灰", "#e5e7eb"], ["深灰", "#6b7280"],
@@ -9,7 +12,7 @@ const COLORS = [
   ["米白", "#f7f1e3"], ["淡粉", "#f5c6cb"],
 ];
 
-type Job = { id: string; width: number; height: number; status: string; resultUrl: string | null; error?: string | null };
+type Job = { id: string; width: number; height: number; status: string; created_at: string; resultUrl: string | null; error?: string | null };
 
 function hexToRgb(hex: string) {
   const value = hex.replace("#", "");
@@ -67,31 +70,39 @@ export default function ResultsPage() {
   const [error, setError] = useState("");
   const [downloadUrl, setDownloadUrl] = useState("");
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pagination, setPagination] = useState<PaginationData>(emptyPagination(6));
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [resolution, setResolution] = useState("");
+  const initialFocus = useRef(true);
 
   useEffect(() => {
-    let cancelled = false;
-    const initialId = new URLSearchParams(window.location.search).get("job") || "";
+    const controller = new AbortController();
+    const initialId = initialFocus.current ? new URLSearchParams(window.location.search).get("job") || "" : "";
     async function load() {
       setLoading(true); setError("");
       try {
-        const response = await fetch("/api/jobs/status", { cache: "no-store" });
+        const response = await fetch(`/api/jobs/status?status=completed&pageSize=6&page=${page}${initialId ? "&jobId=" + encodeURIComponent(initialId) : ""}`, { cache: "no-store", signal: controller.signal });
         const data = await response.json().catch(() => null);
-        if (cancelled) return;
+        if (controller.signal.aborted) return;
         if (!response.ok) throw new Error(data?.error || `读取结果失败 (${response.status})`);
         const completed = (data.jobs || []).filter((job: Job) => job.status === "completed" && job.resultUrl);
-        setJobs(completed);
-        setSelected(completed.find((job: Job) => job.id === initialId) || completed[0] || null);
-      } catch (err) { setError(err instanceof Error ? err.message : "读取结果失败"); }
-      finally { setLoading(false); }
+        setJobs(completed); setPagination(data.pagination); initialFocus.current = false;
+        setPage(data.pagination.page);
+        setSelected(current => completed.find((job: Job) => job.id === initialId) || completed.find((job: Job) => job.id === current?.id) || completed[0] || null);
+      } catch (err) { if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "读取结果失败"); }
+      finally { if (!controller.signal.aborted) setLoading(false); }
     }
-    load();
-    return () => { cancelled = true; };
-  }, []);
+    void load();
+    return () => { controller.abort(); };
+  }, [page, refreshKey]);
+
+  useEffect(() => () => { if (downloadUrl) URL.revokeObjectURL(downloadUrl); }, [downloadUrl]);
 
   useEffect(() => {
     if (!selected) return;
     const loadVersion = ++loadVersionRef.current;
-    setEditing(false); setDownloadUrl(""); setColor("#ffffff");
+    setEditing(false); setDownloadUrl(""); setColor("#ffffff"); setResolution("");
     setPreviewLoading(true); originalPixelsRef.current = null;
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -100,13 +111,15 @@ export default function ResultsPage() {
     image.onload = () => {
       if (loadVersion !== loadVersionRef.current) return;
       canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+      setResolution(`${image.naturalWidth} × ${image.naturalHeight}`);
       const ctx = canvas.getContext("2d");
       if (ctx) { ctx.drawImage(image, 0, 0); originalPixelsRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height); }
       setPreviewLoading(false);
     };
     image.onerror = () => { if (loadVersion === loadVersionRef.current) { setPreviewLoading(false); setError("结果图片加载失败，请重试"); } };
     image.src = `/api/jobs/image?jobId=${encodeURIComponent(selected.id)}`;
-  }, [selected]);
+    return () => { loadVersionRef.current++; image.onload = null; image.onerror = null; };
+  }, [selected?.id]);
 
   function selectResult(job: Job) {
     if (job.id === selected?.id) return;
@@ -157,24 +170,31 @@ export default function ResultsPage() {
   }
 
   return <AppShell>
-    <div className="hero compact-hero"><div><div className="eyebrow">STEP 03 · RESULTS</div><h1>调整并下载</h1><p>选择一个结果，然后调整背景色。下载的是当前画布上的最终图片。</p></div></div>
-    {loading ? <div className="panel empty-state"><div className="spinner"></div><p>正在读取结果…</p></div> : error ? <div className="error">{error}</div> : !jobs.length ? <div className="panel empty-state"><div className="empty-icon">✦</div><h3>还没有生成完成的照片</h3><p>完成任务后，结果会出现在这里。</p></div> : <section className="results-layout">
-      <aside className="panel result-selector"><h2>生成结果</h2><p className="muted">共 {jobs.length} 张</p>{jobs.map(job => <button key={job.id} className={selected?.id === job.id ? "result-item active" : "result-item"} onClick={() => selectResult(job)}><span>{job.width} × {job.height}</span><small>点击编辑</small></button>)}</aside>
+    <div className="page-heading"><div><div className="eyebrow">YOUR PHOTO LIBRARY</div><h1>你的高清照片。</h1><p>选择背景颜色，下载高清证件照。</p></div><Link className="secondary-action" href="/create"><Icon name="plus" size={18} />制作新照片</Link></div>
+    {error && <div className="error" role="alert">{error}<button className="text-action" onClick={() => setRefreshKey(key => key + 1)}>重试</button></div>}
+    {loading && !selected ? <div className="panel empty-state"><div className="spinner" /><p>正在打开照片库…</p></div> : !selected ? <div className="panel empty-state"><div className="empty-icon"><Icon name="photo" size={30} /></div><h3>你的照片，即将到来</h3><p>任务完成后，高清照片会出现在这里。</p><Link className="secondary-action" href="/jobs">查看任务<Icon name="arrow-right" size={17} /></Link></div> : <section className="results-layout">
+      <aside className="panel result-selector" aria-busy={loading}>
+        <div className="library-heading"><div><h2>照片库</h2><p className="muted">{pagination.total} 张高清照片</p></div><button className="icon-button" aria-label="刷新照片库" onClick={() => setRefreshKey(key => key + 1)} disabled={loading}><Icon name="refresh" size={17} /></button></div>
+        <label className="mobile-photo-select">当前照片<select aria-label="选择照片" value={selected.id} disabled={loading} onChange={event => { const job = jobs.find(job => job.id === event.target.value); if (job) selectResult(job); }}>{jobs.map((job, index) => <option key={job.id} value={job.id}>{String((pagination.page - 1) * pagination.pageSize + index + 1).padStart(2, "0")} · {job.width} × {job.height} px</option>)}</select></label>
+        <div className="result-list">{jobs.map((job, index) => <button key={job.id} className={selected.id === job.id ? "result-item active" : "result-item"} aria-pressed={selected.id === job.id} onClick={() => selectResult(job)} disabled={loading}><span className="result-photo-icon"><Icon name="photo" size={22} /></span><span><strong>{job.width} × {job.height}</strong><small>照片 {String((pagination.page - 1) * pagination.pageSize + index + 1).padStart(2, "0")} · 高清</small></span>{selected.id === job.id && <Icon name="check" size={17} />}</button>)}</div>
+        <Pagination data={pagination} onChange={setPage} disabled={loading} compact />
+      </aside>
       <div className="panel result-editor">
-        {selected && <>
-          <div className="editor-head"><div><h2>{selected.width} × {selected.height}</h2><p>背景色调整</p></div><span className="success-pill">✓ 已生成</span></div>
-          <div className={`canvas-stage ${previewLoading ? "loading" : "ready"}`}>
-            {previewLoading && <div className="preview-loading"><div className="spinner"></div><span>正在切换预览…</span></div>}
-            <canvas ref={canvasRef} />
-          </div>
+        <div className="editor-head"><div><h2>照片预览</h2><p>所选比例 {selected.width} : {selected.height}</p></div><span className="success-pill"><Icon name="check" size={14} />已完成</span></div>
+        <div className="editor-workspace">
+          <div className="photo-workspace"><div className={`canvas-stage ${previewLoading ? "loading" : "ready"}`}>
+            {previewLoading && <div className="preview-loading"><div className="spinner" /><span>正在打开高清照片…</span></div>}
+            <canvas ref={canvasRef} aria-label="证件照预览" />
+          </div><p className="resolution-note">{resolution ? `${resolution} px · 高清原图` : "正在加载原图"}</p></div>
           <div className="color-tools">
-            <div className="tool-title"><strong>选择背景色</strong><span>{color.toUpperCase()}</span></div>
-            <div className="color-grid">{COLORS.map(([name, value]) => <button key={value} title={name} aria-label={name} className={color === value ? "color-swatch active" : "color-swatch"} onClick={() => applyColor(value)} disabled={previewLoading}><i style={{ background: value }}></i><span>{name}</span></button>)}</div>
-            <label className="custom-color"><span>自定义颜色</span><input type="color" value={color} onChange={e => applyColor(e.target.value)} disabled={previewLoading} /><code>{color.toUpperCase()}</code></label>
-            {editing && <p className="edit-note">只替换与图片边缘连通的背景区域，人物区域保持不变。</p>}
+            <div className="tool-title"><strong>背景颜色</strong><span>选择喜欢的底色</span></div>
+            <div className="color-grid">{COLORS.map(([name, value]) => <button key={value} title={name} aria-label={name} aria-pressed={color === value} className={color === value ? "color-swatch active" : "color-swatch"} onClick={() => applyColor(value)} disabled={previewLoading || !resolution}><i style={{ background: value }}>{color === value && <Icon name="check" size={16} />}</i><span>{name}</span></button>)}</div>
+            <label className="custom-color"><span>自定义</span><code>{color.toUpperCase()}</code><input aria-label="自定义背景颜色" type="color" value={color} onChange={e => applyColor(e.target.value)} disabled={previewLoading || !resolution} /></label>
+            <p className="edit-note">{editing ? "背景已更新，可以下载了。" : "选定背景色，即时查看效果。"}</p>
+            <button className="primary-action download-action" onClick={download} disabled={previewLoading || !resolution}><Icon name="download" size={18} />下载高清照片</button>
+            <p className="download-note">PNG 格式 · 保留高清画质</p>
           </div>
-          <button className="download-action" onClick={download} disabled={previewLoading}>↓ 下载当前图片</button>
-        </>}
+        </div>
       </div>
     </section>}
   </AppShell>;

@@ -63,11 +63,19 @@ async function reconcileStaleWorker() {
   });
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const params = new URL(request.url).searchParams;
+    const integer = (value: string | null, fallback: number, max: number) => {
+      const parsed = Number(value);
+      return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, max) : fallback;
+    };
+    const pageSize = integer(params.get("pageSize"), 8, 50);
+    const requestedPage = integer(params.get("page"), 1, 1000000);
+    const filter = ["queued", "processing", "completed", "failed"].includes(params.get("status") || "") ? params.get("status")! : "";
     await reconcileStaleWorker();
 
-    const [counts, state, jobs, backend] = await Promise.all([
+    const [counts, state, backend] = await Promise.all([
       sql`
         SELECT
           COUNT(*) FILTER (WHERE status = 'queued')::int AS queued,
@@ -78,15 +86,33 @@ export async function GET() {
         FROM photo_jobs
       `,
       sql`SELECT status, started_at FROM photo_worker_state WHERE id = 1`,
-      sql`
-        SELECT id, request_id, width, height, unit, dpi, background, output_key,
-               status, error, processing_time_ms, created_at, started_at, completed_at
-        FROM photo_jobs
-        ORDER BY created_at DESC
-        LIMIT 30
-      `,
       getBackendHealth(),
     ]);
+
+    const total = Number(counts[0][filter || "total"] || 0);
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    let page = Math.min(requestedPage, totalPages);
+    // Open the right library page when following a link to an older result.
+    const focusId = params.get("jobId");
+    if (focusId && focusId.length <= 100) {
+      const position = await sql`
+        SELECT COUNT(*)::int AS position FROM photo_jobs
+        WHERE (${filter}::text = '' OR status = ${filter})
+          AND (created_at, id) >= (
+            SELECT created_at, id FROM photo_jobs
+            WHERE id = ${focusId} AND (${filter}::text = '' OR status = ${filter})
+          )
+      `;
+      if (Number(position[0]?.position) > 0) page = Math.min(Math.ceil(Number(position[0].position) / pageSize), totalPages);
+    }
+    const jobs = await sql`
+      SELECT id, request_id, width, height, unit, dpi, background, output_key,
+             status, error, processing_time_ms, created_at, started_at, completed_at
+      FROM photo_jobs
+      WHERE (${filter}::text = '' OR status = ${filter})
+      ORDER BY created_at DESC, id DESC
+      LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}
+    `;
 
     const resultJobs = jobs.map((job) => ({
       ...job,
@@ -98,6 +124,7 @@ export async function GET() {
       worker: state[0] || { status: "idle" },
       jobs: resultJobs,
       backend,
+      pagination: { page, pageSize, total, totalPages },
     });
   } catch (error) {
     console.error(error);
