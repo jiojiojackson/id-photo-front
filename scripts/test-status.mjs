@@ -4,7 +4,7 @@ import ts from 'typescript';
 import { test, after } from 'node:test';
 
 let code = fs.readFileSync(new URL('../app/api/jobs/status/route.ts', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '');
-code = 'const { NextResponse, sql, getBackendHealth } = globalThis.__statusDependencies;\n' + code;
+code = 'const { NextResponse, sql, getBackendHealth, backendOptions, isBackendLocation } = globalThis.__statusDependencies;\n' + code;
 const compiled = ts.transpileModule(code, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
 after(() => { delete globalThis.__statusDependencies; });
 let version = 0;
@@ -16,13 +16,15 @@ async function status(query = '', { counts = { queued: 2, processing: 0, complet
     queries.push({ statement, values });
     if (statement.startsWith('SELECT\n          COUNT')) return [counts];
     if (statement.startsWith('SELECT COUNT(*)::int AS position')) return [{ position }];
-    if (statement.startsWith('SELECT status')) return [{ status: 'idle' }];
+    if (statement.startsWith('SELECT state.status')) return [{ status: 'idle', backend: null }];
     if (statement.startsWith('SELECT id, request_id')) return [{ id: 'test result', status: 'completed', width: 295, height: 413 }];
     return [];
   };
   sql.begin = async callback => callback(async () => []);
   globalThis.__statusDependencies = {
     sql, getBackendHealth: async () => ({ reachable: true }),
+    backendOptions: () => [{ id:'oracle',configured:true },{ id:'modal',configured:true }],
+    isBackendLocation: value => ['oracle','modal'].includes(value),
     NextResponse: { json: (body, options = {}) => new Response(JSON.stringify(body), { status: options.status || 200 }) },
   };
   const module = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}#${version++}`);

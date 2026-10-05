@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
-import { getBackendHealth } from "@/lib/backend";
+import { getBackendHealth, backendOptions, isBackendLocation } from "@/lib/backend";
 
 export const runtime = "nodejs";
 
@@ -23,7 +23,9 @@ async function reconcileStaleWorker() {
       WHERE status IN ('starting', 'running')
         AND (
           credential_expires_at <= NOW()
-          OR last_seen_at <= NOW() - (${WORKER_STALE_SECONDS} || ' seconds')::interval
+          OR last_seen_at <= NOW() - (
+            (CASE WHEN backend = 'modal' AND status = 'starting' THEN 600 ELSE ${WORKER_STALE_SECONDS} END) || ' seconds'
+          )::interval
         )
       FOR UPDATE
     `;
@@ -66,6 +68,8 @@ async function reconcileStaleWorker() {
 export async function GET(request: Request) {
   try {
     const params = new URL(request.url).searchParams;
+    const selectedBackend = params.get("backend") || "oracle";
+    if (!isBackendLocation(selectedBackend)) return NextResponse.json({ error: "无效的处理位置" }, { status: 400 });
     const integer = (value: string | null, fallback: number, max: number) => {
       const parsed = Number(value);
       return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, max) : fallback;
@@ -85,8 +89,11 @@ export async function GET(request: Request) {
           COUNT(*)::int AS total
         FROM photo_jobs
       `,
-      sql`SELECT status, started_at FROM photo_worker_state WHERE id = 1`,
-      getBackendHealth(),
+      sql`SELECT state.status, state.started_at, run.backend
+          FROM photo_worker_state state
+          LEFT JOIN photo_worker_runs run ON run.id = state.active_run_id
+          WHERE state.id = 1`,
+      getBackendHealth(selectedBackend),
     ]);
 
     const total = Number(counts[0][filter || "total"] || 0);
@@ -106,7 +113,7 @@ export async function GET(request: Request) {
       if (Number(position[0]?.position) > 0) page = Math.min(Math.ceil(Number(position[0].position) / pageSize), totalPages);
     }
     const jobs = await sql`
-      SELECT id, request_id, width, height, unit, dpi, background, output_key,
+      SELECT id, request_id, width, height, unit, dpi, background, output_key, backend,
              status, error, processing_time_ms, created_at, started_at, completed_at
       FROM photo_jobs
       WHERE (${filter}::text = '' OR status = ${filter})
@@ -124,6 +131,7 @@ export async function GET(request: Request) {
       worker: state[0] || { status: "idle" },
       jobs: resultJobs,
       backend,
+      backends: backendOptions(),
       pagination: { page, pageSize, total, totalPages },
     });
   } catch (error) {

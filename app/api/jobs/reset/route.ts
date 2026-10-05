@@ -1,15 +1,15 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { emptyBucket } from "@/lib/r2";
-import { getBackendHealth } from "@/lib/backend";
+import { getBackendHealth, backendOptions } from "@/lib/backend";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
 export async function POST() {
   try {
-    const backend = await getBackendHealth();
-    if (!backend.reachable || backend.workerRunId) {
+    const backends = await Promise.all(backendOptions().filter(option => option.configured).map(option => getBackendHealth(option.id)));
+    if (!backends.length || backends.some(backend => !backend.reachable || backend.workerRunId)) {
       return NextResponse.json({ error: "处理服务尚未空闲，暂时无法清空照片" }, { status: 409 });
     }
     const result = await sql.begin(async (tx) => {

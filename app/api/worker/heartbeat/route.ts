@@ -14,9 +14,22 @@ export async function POST(request: Request) {
 
   const body = await request.json().catch(() => ({}));
   const jobId = String(body.jobId || "");
-  if (!jobId) return NextResponse.json({ error: "jobId is required" }, { status: 400 });
-
   const runId = String(worker.id);
+  if (!jobId) {
+    if (body.ready !== true) return NextResponse.json({ error: "jobId or ready heartbeat is required" }, { status: 400 });
+    const updated = await sql.begin(async (tx) => {
+      await tx`SELECT id FROM photo_worker_state WHERE id = 1 FOR UPDATE`;
+      const rows = await tx`
+        UPDATE photo_worker_runs SET status = 'running', last_seen_at = NOW()
+        WHERE id = ${runId} AND status IN ('starting', 'running')
+        RETURNING id
+      `;
+      if (!rows.length) return false;
+      await tx`UPDATE photo_worker_state SET status = 'running', updated_at = NOW() WHERE id = 1 AND active_run_id = ${runId}`;
+      return true;
+    });
+    return NextResponse.json({ ok: updated }, { status: updated ? 200 : 409 });
+  }
   const rows = await sql.begin(async (tx) => {
     const leaseRows = await tx<LeaseRow[]>`
       UPDATE photo_jobs

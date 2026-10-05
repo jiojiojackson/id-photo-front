@@ -31,6 +31,7 @@ async function claim(jobId: string, workerRunId: string) {
     )
     UPDATE photo_jobs AS j
     SET status = 'processing', worker_run_id = ${workerRunId}, claimed_at = NOW(),
+        backend = (SELECT backend FROM photo_worker_runs WHERE id = ${workerRunId}),
         lease_expires_at = NOW() + (${LEASE_SECONDS} || ' seconds')::interval,
         attempt_count = j.attempt_count + 1,
         started_at = COALESCE(j.started_at, NOW()), error = NULL
@@ -55,6 +56,7 @@ async function claimNext(workerRunId: string) {
     )
     UPDATE photo_jobs AS j
     SET status = 'processing', worker_run_id = ${workerRunId}, claimed_at = NOW(),
+        backend = (SELECT backend FROM photo_worker_runs WHERE id = ${workerRunId}),
         lease_expires_at = NOW() + (${LEASE_SECONDS} || ' seconds')::interval,
         attempt_count = j.attempt_count + 1,
         started_at = COALESCE(j.started_at, NOW()), error = NULL

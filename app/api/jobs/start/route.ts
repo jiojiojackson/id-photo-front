@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { createWorkerCredential, credentialExpiryDate, hashWorkerCredential } from "@/lib/worker-auth";
-import { backendConfig } from "@/lib/backend";
+import { backendConfig, isBackendLocation } from "@/lib/backend";
 
 export const runtime = "nodejs";
 // The persistent backend acknowledges the run before starting inference.
@@ -13,7 +13,10 @@ export async function POST(request: NextRequest) {
   let workerRunId: string | null = null;
 
   try {
-    const backend = backendConfig();
+    const body = await request.json().catch(() => ({}));
+    const location = body.backend ?? "oracle";
+    if (!isBackendLocation(location)) return NextResponse.json({ error: "请选择 Oracle 或 Modal 处理位置" }, { status: 400 });
+    const backend = backendConfig(location);
 
     const credential = createWorkerCredential();
     const credentialHash = await hashWorkerCredential(credential);
@@ -24,16 +27,17 @@ export async function POST(request: NextRequest) {
 
       if (state[0]?.status !== "idle" && state[0]?.active_run_id) {
         const active = await tx`
-          SELECT status, credential_expires_at, last_seen_at
+          SELECT status, backend, credential_expires_at, last_seen_at
           FROM photo_worker_runs
           WHERE id = ${String(state[0].active_run_id)}
           FOR UPDATE
         `;
         const lastSeen = active[0]?.last_seen_at ? new Date(active[0].last_seen_at).getTime() : 0;
+        const staleSeconds = active[0]?.backend === "modal" && active[0]?.status === "starting" ? 600 : WORKER_STALE_SECONDS;
         const stale = !active[0]
           || ["completed", "failed"].includes(String(active[0].status))
           || new Date(active[0].credential_expires_at).getTime() <= Date.now()
-          || lastSeen < Date.now() - WORKER_STALE_SECONDS * 1000;
+          || lastSeen < Date.now() - staleSeconds * 1000;
         if (!stale) return { started: false, reason: "already_running" as const, count: 0 };
 
         const staleRunId = String(state[0].active_run_id);
@@ -65,8 +69,8 @@ export async function POST(request: NextRequest) {
 
       workerRunId = crypto.randomUUID();
       await tx`
-        INSERT INTO photo_worker_runs (id, credential_hash, credential_expires_at, status)
-        VALUES (${workerRunId}, ${credentialHash}, ${expiresAt}, 'starting')
+        INSERT INTO photo_worker_runs (id, credential_hash, credential_expires_at, status, backend)
+        VALUES (${workerRunId}, ${credentialHash}, ${expiresAt}, 'starting', ${location})
       `;
       await tx`
         UPDATE photo_worker_state
@@ -82,7 +86,7 @@ export async function POST(request: NextRequest) {
 
     const vercelOrigin = request.nextUrl.origin;
     const bridgeUrl = `${vercelOrigin}/api/worker`;
-    backend.url.pathname += "/process-queue";
+    backend.url.pathname = backend.url.pathname.replace(/\/$/, "") + "/process-queue";
     const wakeResponse = await fetch(backend.url, {
       method: "POST",
       headers: {
@@ -106,19 +110,24 @@ export async function POST(request: NextRequest) {
       const errorMessage = `处理服务未接受本次任务 (HTTP ${wakeResponse.status})`;
       console.error("[WorkerStart]", errorMessage);
       await sql.begin(async (tx) => {
+        await tx`SELECT id FROM photo_worker_state WHERE id = 1 FOR UPDATE`;
         await tx`UPDATE photo_worker_runs SET status = 'failed', finished_at = NOW(), error = ${errorMessage} WHERE id = ${workerRunId}`;
         await tx`UPDATE photo_worker_state SET status = 'idle', active_run_id = NULL, updated_at = NOW() WHERE id = 1 AND active_run_id = ${workerRunId}`;
       });
       return NextResponse.json({ error: `启动处理服务失败 (${wakeResponse.status})` }, { status: 502 });
     }
 
-    await sql.begin(async (tx) => {
-      await tx`UPDATE photo_worker_runs SET status = 'running', last_seen_at = NOW() WHERE id = ${workerRunId} AND status = 'starting'`;
-      await tx`UPDATE photo_worker_state SET status = 'running', updated_at = NOW() WHERE id = 1 AND active_run_id = ${workerRunId}`;
-    });
+    if (location === "oracle") {
+      await sql.begin(async (tx) => {
+        await tx`SELECT id FROM photo_worker_state WHERE id = 1 FOR UPDATE`;
+        await tx`UPDATE photo_worker_runs SET status = 'running', last_seen_at = NOW() WHERE id = ${workerRunId} AND status = 'starting'`;
+        await tx`UPDATE photo_worker_state SET status = 'running', updated_at = NOW() WHERE id = 1 AND active_run_id = ${workerRunId}`;
+      });
+    }
 
     return NextResponse.json({
       status: "started",
+      backend: location,
       workerRunId,
       jobs: claimed.count,
       credentialExpiresAt: expiresAt.toISOString(),

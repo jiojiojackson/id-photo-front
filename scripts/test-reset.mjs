@@ -5,18 +5,19 @@ import { test, after } from 'node:test';
 
 let code=fs.readFileSync(new URL('../app/api/jobs/reset/route.ts',import.meta.url),'utf8');
 code=code.replace(/^import .*;\n/gm,'');
-code='const { NextResponse, sql, emptyBucket, getBackendHealth } = globalThis.__resetDependencies;\n'+code;
+code='const { NextResponse, sql, emptyBucket, getBackendHealth, backendOptions } = globalThis.__resetDependencies;\n'+code;
 const compiled=ts.transpileModule(code,{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText;
 after(()=>{delete globalThis.__resetDependencies;});
 let version=0;
-async function route({backend={reachable:true,workerRunId:null},state='idle',storageError=null}={}) {
+async function route({backend={reachable:true,workerRunId:null},modalBackend=null,state='idle',storageError=null}={}) {
   const operations=[];let storageCalls=0;
   const tx=async (strings)=>{const query=strings.join('?').trim();operations.push(query);if(query.startsWith('SELECT status'))return [{status:state}];if(query.startsWith('SELECT COUNT'))return [{count:0}];return [];};
   globalThis.__resetDependencies={
     NextResponse:{json:(body,options={})=>new Response(JSON.stringify(body),{status:options.status || 200})},
     sql:{begin:async callback=>callback(tx)},
     emptyBucket:async()=>{storageCalls++;if(storageError)throw storageError;return 2;},
-    getBackendHealth:async()=>backend,
+    backendOptions:()=>[{id:'oracle',configured:true},{id:'modal',configured:Boolean(modalBackend)}],
+    getBackendHealth:async location=>location === 'modal' ? modalBackend : backend,
   };
   const module=await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}#${version++}`);
   return {response:await module.POST(),operations,storageCalls};
@@ -28,6 +29,10 @@ test('busy backend blocks deletion without a storage request',async()=>{
 });
 test('busy database worker blocks deletion before touching R2',async()=>{
   const result=await route({state:'running'});
+  assert.equal(result.response.status,409);assert.equal(result.storageCalls,0);
+});
+test('active Modal GPU blocks deletion even when Oracle is idle',async()=>{
+  const result=await route({modalBackend:{reachable:true,workerRunId:'modal-run'}});
   assert.equal(result.response.status,409);assert.equal(result.storageCalls,0);
 });
 test('storage failure preserves database records',async()=>{

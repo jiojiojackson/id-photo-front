@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS photo_jobs (
   status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','processing','completed','failed')),
   error TEXT,
   processing_time_ms INTEGER,
+  backend TEXT NOT NULL DEFAULT 'oracle' CHECK (backend IN ('oracle', 'modal')),
   attempt_count INTEGER NOT NULL DEFAULT 0,
   worker_run_id TEXT,
   claimed_at TIMESTAMPTZ,
@@ -43,6 +44,7 @@ CREATE TABLE IF NOT EXISTS photo_worker_runs (
   id TEXT PRIMARY KEY,
   credential_hash TEXT NOT NULL UNIQUE,
   credential_expires_at TIMESTAMPTZ NOT NULL,
+  backend TEXT NOT NULL DEFAULT 'oracle' CHECK (backend IN ('oracle', 'modal')),
   status TEXT NOT NULL DEFAULT 'starting' CHECK (status IN ('starting','running','completed','failed')),
   started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -72,3 +74,5 @@ ALTER TABLE photo_jobs ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
 ALTER TABLE photo_jobs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
 ALTER TABLE photo_worker_runs ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE photo_worker_state ADD COLUMN IF NOT EXISTS active_run_id TEXT REFERENCES photo_worker_runs(id);
+ALTER TABLE photo_worker_runs ADD COLUMN IF NOT EXISTS backend TEXT NOT NULL DEFAULT 'oracle' CHECK (backend IN ('oracle', 'modal'));
+ALTER TABLE photo_jobs ADD COLUMN IF NOT EXISTS backend TEXT NOT NULL DEFAULT 'oracle' CHECK (backend IN ('oracle', 'modal'));
