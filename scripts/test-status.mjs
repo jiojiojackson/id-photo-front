@@ -4,13 +4,13 @@ import ts from 'typescript';
 import { test, after } from 'node:test';
 
 let code = fs.readFileSync(new URL('../app/api/jobs/status/route.ts', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '');
-code = 'const { NextResponse, sql, getBackendHealth, backendOptions, isBackendLocation } = globalThis.__statusDependencies;\n' + code;
+code = 'const { NextResponse, sql, getBackendHealth } = globalThis.__statusDependencies;\n' + code;
 const compiled = ts.transpileModule(code, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
 after(() => { delete globalThis.__statusDependencies; });
 let version = 0;
 
 async function status(query = '', { counts = { queued: 2, processing: 0, completed: 27, failed: 1, total: 30 }, position = 0 } = {}) {
-  const queries = [];
+  const queries = [], healthCalls = [];
   const sql = async (strings, ...values) => {
     const statement = strings.join('?').trim();
     queries.push({ statement, values });
@@ -22,14 +22,12 @@ async function status(query = '', { counts = { queued: 2, processing: 0, complet
   };
   sql.begin = async callback => callback(async () => []);
   globalThis.__statusDependencies = {
-    sql, getBackendHealth: async () => ({ reachable: true }),
-    backendOptions: () => [{ id:'oracle',configured:true },{ id:'modal',configured:true }],
-    isBackendLocation: value => ['oracle','modal'].includes(value),
+    sql, getBackendHealth: async (...args) => { healthCalls.push(args); return { location:'modal',configured:true,reachable:true }; },
     NextResponse: { json: (body, options = {}) => new Response(JSON.stringify(body), { status: options.status || 200 }) },
   };
   const module = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}#${version++}`);
   const response = await module.GET(new Request('https://example.test/api/jobs/status?' + query));
-  return { response, body: await response.json(), queries };
+  return { response, body: await response.json(), queries, healthCalls };
 }
 
 test('completed library uses its own total and paginates in stable order', async () => {
@@ -59,4 +57,12 @@ test('an older selected photo opens its actual library page', async () => {
 test('empty filtered library remains on page one', async () => {
   const result = await status('status=processing&page=8');
   assert.deepEqual(result.body.pagination, { page: 1, pageSize: 8, total: 0, totalPages: 1 });
+});
+test('old backend query parameters cannot switch health checks away from Modal', async () => {
+  const result = await status('backend=oracle');
+  assert.equal(result.response.status,200);
+  assert.equal(result.body.backend.location,'modal');
+  assert.equal(result.body.backend.configured,true);
+  assert.deepEqual(result.healthCalls,[[]]);
+  assert.equal(result.body.backends,undefined);
 });

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
-import { getBackendHealth, backendOptions, isBackendLocation } from "@/lib/backend";
+import { getBackendHealth } from "@/lib/backend";
 
 export const runtime = "nodejs";
 
@@ -68,8 +68,6 @@ async function reconcileStaleWorker() {
 export async function GET(request: Request) {
   try {
     const params = new URL(request.url).searchParams;
-    const selectedBackend = params.get("backend") || "oracle";
-    if (!isBackendLocation(selectedBackend)) return NextResponse.json({ error: "无效的处理位置" }, { status: 400 });
     const integer = (value: string | null, fallback: number, max: number) => {
       const parsed = Number(value);
       return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, max) : fallback;
@@ -93,7 +91,7 @@ export async function GET(request: Request) {
           FROM photo_worker_state state
           LEFT JOIN photo_worker_runs run ON run.id = state.active_run_id
           WHERE state.id = 1`,
-      getBackendHealth(selectedBackend),
+      getBackendHealth(),
     ]);
 
     const total = Number(counts[0][filter || "total"] || 0);
@@ -131,7 +129,6 @@ export async function GET(request: Request) {
       worker: state[0] || { status: "idle" },
       jobs: resultJobs,
       backend,
-      backends: backendOptions(),
       pagination: { page, pageSize, total, totalPages },
     });
   } catch (error) {

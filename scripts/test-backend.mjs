@@ -12,23 +12,24 @@ after(()=>{ for(const key of keys) { if(original[key] === undefined) delete proc
 function configure() {
   Object.assign(process.env,{PANGOLIN_API_URL:'https://oracle.example/process-queue',PANGOLIN_ACCESS_TOKEN_ID:'oracle-id',PANGOLIN_ACCESS_TOKEN:'oracle-token',MODAL_API_URL:'https://example--id-photo.modal.run',MODAL_BACKEND_TOKEN:'modal-token'});
 }
-test('Oracle stays the default and receives only Pangolin credentials',()=>{
+test('Modal is the default even when legacy Oracle credentials remain configured',()=>{
   configure();
   const config=backend.backendConfig();
-  assert.equal(config.url.href,'https://oracle.example/');
-  assert.deepEqual(config.headers,{'P-Access-Token-Id':'oracle-id','P-Access-Token':'oracle-token'});
+  assert.equal(config.url.href,'https://example--id-photo.modal.run/');
+  assert.deepEqual(config.headers,{Authorization:'Bearer modal-token'});
 });
 test('Modal receives its dedicated token without Oracle credentials',()=>{
   configure();
-  const config=backend.backendConfig('modal');
+  for (const key of keys.filter(key=>key.startsWith('PANGOLIN'))) delete process.env[key];
+  const config=backend.backendConfig();
   assert.equal(config.url.hostname,'example--id-photo.modal.run');
   assert.deepEqual(config.headers,{Authorization:'Bearer modal-token'});
 });
 test('missing Modal configuration and arbitrary endpoint URLs are rejected',()=>{
   configure();delete process.env.MODAL_BACKEND_TOKEN;
-  assert.throws(()=>backend.backendConfig('modal'),/尚未配置/);
+  assert.throws(()=>backend.backendConfig(),/尚未配置/);
   process.env.MODAL_BACKEND_TOKEN='test';process.env.MODAL_API_URL='http://localhost';
-  assert.throws(()=>backend.backendConfig('modal'),/地址无效/);
+  assert.throws(()=>backend.backendConfig(),/地址无效/);
   assert.equal(backend.isBackendLocation('https://elsewhere.example'),false);
 });
 
@@ -46,7 +47,7 @@ async function start(location, active=null) {
   };
   const sql=async()=>[{avg_ms:0}];sql.begin=async callback=>callback(tx);
   globalThis.__startDependencies={
-    sql,backendConfig:choice=>({url:new URL(choice === 'modal' ? 'https://test.modal.run' : 'https://oracle.example'),headers:{'X-Test-Backend':choice}}),
+    sql,backendConfig:()=>({url:new URL('https://test.modal.run'),headers:{Authorization:'Bearer dedicated-modal-token'}}),
     isBackendLocation:backend.isBackendLocation,createWorkerCredential:()=> 'a'.repeat(64),hashWorkerCredential:async()=> 'hash',credentialExpiryDate:()=>new Date(Date.now()+3600000),
     NextResponse:{json:(body,options={})=>new Response(JSON.stringify(body),{status:options.status||200})},
     fetch:async(url,options)=>{const payload=JSON.parse(options.body);wakes.push({url:String(url),payload,headers:options.headers});return new Response(JSON.stringify({status:'started',worker_run_id:payload.worker_run_id}));},
@@ -59,6 +60,10 @@ test('invalid backend selection never creates a run or contacts a backend',async
   const result=await start('unknown');
   assert.equal(result.response.status,400);assert.equal(result.queries.length,0);assert.equal(result.wakes.length,0);
 });
+test('explicit Oracle requests are rejected before database or network access',async()=>{
+  const result=await start('oracle');
+  assert.equal(result.response.status,400);assert.equal(result.queries.length,0);assert.equal(result.wakes.length,0);
+});
 test('Modal starts asynchronously and remains starting until a GPU heartbeat',async()=>{
   const result=await start('modal');
   assert.equal(result.response.status,200);assert.equal(result.body.backend,'modal');
@@ -67,13 +72,15 @@ test('Modal starts asynchronously and remains starting until a GPU heartbeat',as
   assert.ok(result.queries.some(q=>q.query.startsWith('INSERT INTO photo_worker_runs') && q.values.includes('modal')));
   assert.ok(result.queries.every(q=>!q.query.includes("SET status = 'running'")));
 });
-test('legacy start requests still use Oracle',async()=>{
+test('start requests without a backend use Modal and await GPU readiness',async()=>{
   const result=await start();
-  assert.equal(result.body.backend,'oracle');
-  assert.equal(result.wakes[0].url,'https://oracle.example/process-queue');
+  assert.equal(result.body.backend,'modal');
+  assert.equal(result.wakes[0].url,'https://test.modal.run/process-queue');
+  assert.equal(result.wakes[0].headers.Authorization,'Bearer dedicated-modal-token');
+  assert.ok(result.queries.every(q=>!q.query.includes("SET status = 'running'")));
 });
 test('Modal cold start is not reclaimed after only three minutes',async()=>{
-  const result=await start('oracle',{backend:'modal',status:'starting',credential_expires_at:new Date(Date.now()+3600000),last_seen_at:new Date(Date.now()-180000)});
+  const result=await start(undefined,{backend:'modal',status:'starting',credential_expires_at:new Date(Date.now()+3600000),last_seen_at:new Date(Date.now()-180000)});
   assert.equal(result.body.status,'already_running');
   assert.equal(result.wakes.length,0);
 });

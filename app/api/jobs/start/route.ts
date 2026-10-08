@@ -4,7 +4,7 @@ import { createWorkerCredential, credentialExpiryDate, hashWorkerCredential } fr
 import { backendConfig, isBackendLocation } from "@/lib/backend";
 
 export const runtime = "nodejs";
-// The persistent backend acknowledges the run before starting inference.
+// Modal acknowledges the detached GPU run before starting inference.
 export const maxDuration = 60;
 
 const WORKER_STALE_SECONDS = 120;
@@ -14,9 +14,9 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json().catch(() => ({}));
-    const location = body.backend ?? "oracle";
-    if (!isBackendLocation(location)) return NextResponse.json({ error: "请选择 Oracle 或 Modal 处理位置" }, { status: 400 });
-    const backend = backendConfig(location);
+    const location = body.backend ?? "modal";
+    if (!isBackendLocation(location)) return NextResponse.json({ error: "仅支持 Modal 处理服务，请刷新页面后重试" }, { status: 400 });
+    const backend = backendConfig();
 
     const credential = createWorkerCredential();
     const credentialHash = await hashWorkerCredential(credential);
@@ -117,14 +117,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: `启动处理服务失败 (${wakeResponse.status})` }, { status: 502 });
     }
 
-    if (location === "oracle") {
-      await sql.begin(async (tx) => {
-        await tx`SELECT id FROM photo_worker_state WHERE id = 1 FOR UPDATE`;
-        await tx`UPDATE photo_worker_runs SET status = 'running', last_seen_at = NOW() WHERE id = ${workerRunId} AND status = 'starting'`;
-        await tx`UPDATE photo_worker_state SET status = 'running', updated_at = NOW() WHERE id = 1 AND active_run_id = ${workerRunId}`;
-      });
-    }
-
     return NextResponse.json({
       status: "started",
       backend: location,
@@ -148,7 +140,7 @@ async function estimateSeconds(jobCount: number) {
   const rows = await sql`
     SELECT COALESCE(AVG(processing_time_ms), 0)::float8 AS avg_ms
     FROM photo_jobs
-    WHERE status = 'completed' AND processing_time_ms IS NOT NULL
+    WHERE status = 'completed' AND backend = 'modal' AND processing_time_ms IS NOT NULL
   `;
   const avgMs = Number(rows[0]?.avg_ms || 0);
   if (!avgMs) return null;
